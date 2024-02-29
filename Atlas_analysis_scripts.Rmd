@@ -1,0 +1,1335 @@
+---
+title: "220210_EM1_EM2_combined"
+author: "Hope Healey"
+date: "2/10/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Loading in Libraries 
+
+```{r}
+library(Seurat)
+library(tidyverse)
+library(cowplot)
+#library(edgeR)
+library(dplyr)
+library(magrittr)
+library(Matrix)
+library(purrr)
+library(reshape2)
+library(S4Vectors)
+library(tibble)
+library(pheatmap)
+library(png)
+#library(DESeq2)
+library(RColorBrewer)
+library(sctransform)
+(future.globals.maxSize = 4000 * 1024^5)
+
+sessionInfo()
+```
+
+## Gulf pipefish embryonic atlas data analysis
+
+We used the 2022 Gulf Pipefish Genome combined with the pipefish mitochondrial genome to run Cell Ranger. After running Cell Ranger, we completed our analysis in R using Seurat.
+
+### Quality Control 
+
+We used two packages for quality control, SoupX and Scrublet. SoupX is a software that removes background contamination (RNAs that were in the "soup" of things being prepared) from scRNAseq data. It identifies genes that are present in cells that they should not be and then make adjusted matrices from their calculations. SoupX is run in R and is the first bit of pre-processing. The tool requires the knowledge of what cells belong to what clusters to help figure out what genes are present in the wrong spots, so the data undergoes transformation, clustering, and plotting before soupX is run. After it is run, it spits out a new matrix to use for the gene counts. We ran Scrublet in a separate python script and then imported the results here to remove doublets. In conjunction with these tools, we also set manual thresholds:removed cells with more than 10% MT reads, cells with less than 500 genes counted and those with more than 9000 genes, and total counts less than 1E5. 
+
+We completed these quality control steps for the two samples separately.
+
+```{r}
+
+ssc_em1.data <- Read10X(data.dir = "~/Dropbox (University of Oregon)/Hope_Dissertation_Folder/SingleCell/Ssc_single_cell/211210_Experiment/230120_ssc_emb1_embpouchISO_sscMT/filtered_feature_bc_matrix/")
+ssc_em1.data.previous <- Read10X(data.dir = "~/Dropbox (University of Oregon)/Hope_Dissertation_Folder/SingleCell/Ssc_single_cell/211210_Experiment/230120_ssc_emb1_embpouchISO_sscMT/filtered_feature_bc_matrix/")
+ssc_em1 <- CreateSeuratObject(counts = ssc_em1.data, project = "ssc_em1")
+
+# Initialize the Seurat object with the raw (non-normalized data).
+plot2 <- FeatureScatter(ssc_em1, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+plot2
+
+ssc_em1 <- SCTransform(ssc_em1, verbose = TRUE)
+ssc_em1
+
+ssc_em1 <- RunPCA(ssc_em1, verbose = TRUE)
+ElbowPlot(object = ssc_em1, ndims=50)
+ssc_em1 <- RunUMAP(ssc_em1, dims = 1:11, verbose = FALSE)
+ssc_em1 <- FindNeighbors(ssc_em1, dims = 1:11, verbose = FALSE)
+ssc_em1 <- FindClusters(ssc_em1, verbose = FALSE)
+
+library(gridExtra)
+
+
+UMAPssc_em1 <- DimPlot(ssc_em1, label = TRUE, label.size = 6) 
+UMAPssc_em1
+
+#####Removing extraneous RNA from the soup with soupX
+library(SoupX)
+ssc_em1_raw.data <- Read10X(data.dir = "~/Dropbox (University of Oregon)/Hope_Dissertation_Folder/SingleCell/Ssc_single_cell/211210_Experiment/230120_ssc_emb1_embpouchISO_sscMT/raw_feature_bc_matrix/")
+sc <- SoupChannel(ssc_em1_raw.data, ssc_em1.data, calcSoupProfile = FALSE)
+sc <- estimateSoup(sc)
+
+ssc_em1.data <- sc$toc
+
+scNoDrops <- SoupChannel(ssc_em1_raw.data, ssc_em1.data, calcSoupProfile = FALSE)
+
+soupProf <- data.frame(row.names = rownames(ssc_em1.data), est=rowSums(ssc_em1.data)/sum(ssc_em1.data), counts = rowSums(ssc_em1.data))
+
+scNoDrops <- setSoupProfile(scNoDrops, soupProf)
+
+meta <- ssc_em1@meta.data
+umap <- ssc_em1@reductions$umap@cell.embeddings
+
+names <- setNames(meta$seurat_clusters, rownames(meta))
+
+sc$metaData
+
+length(sc$toc@Dimnames[[2]])
+
+length(names)
+sc <- setClusters(sc, names)
+
+sc <- autoEstCont(sc)
+
+head(sc$soupProfile[order(sc$soupProfile$est, decreasing = T), ], n = 50)
+
+out <- adjustCounts(sc)
+
+ssc_em1 <- CreateSeuratObject(counts = out, project = "ssc_em1")
+
+
+####getting rid of doublets
+ssc_em1_doublet_scores <- read.table("~/Dropbox (University of Oregon)/Hope_Dissertation_Folder/SingleCell/Ssc_single_cell/211210_Experiment/230120_ssc_emb1_embpouchISO_sscMT/doublet_scores.txt")
+
+hist(ssc_em1_doublet_scores$V1)
+ssc_em1_doublet_scores$doub <-ssc_em1_doublet_scores$V1 > .76
+colnames(ssc_em1_doublet_scores) <- c("values", "doub")
+
+
+ssc_em1@meta.data$doub_values <- ssc_em1_doublet_scores$values
+ssc_em1@meta.data$doub_true <- ssc_em1_doublet_scores$doub
+ssc_em1@meta.data$fish <- "ssc"
+
+FeatureScatter(ssc_em1, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+FeatureScatter(ssc_em1, feature1 = "nFeature_RNA", feature2 = "doub_values")
+FeatureScatter(ssc_em1, feature1 = "nCount_RNA", feature2 = "doub_values")
+
+
+ssc_em1[['QC']] <- ifelse(ssc_em1@meta.data$doub_true == 'True','Doublet','Pass')
+ssc_em1[['QC']] <- ifelse(ssc_em1@meta.data$nFeature_RNA < 500 & ssc_em1@meta.data$QC == 'Pass','Low_nFeature',ssc_em1@meta.data$QC)
+ssc_em1[['QC']] <- ifelse(ssc_em1@meta.data$nFeature_RNA < 500 & ssc_em1@meta.data$QC != 'Pass' & ssc_em1@meta.data$QC != 'Low_nFeature',paste('Low_nFeature',ssc_em1@meta.data$QC,sep = ','),ssc_em1@meta.data$QC)
+table(ssc_em1[['QC']])
+
+ssc_em1[["percent.mt"]] <- PercentageFeatureSet(ssc_em1, pattern = "^MT-")
+VlnPlot(ssc_em1, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+
+ssc_em1 <- subset(ssc_em1, subset = nFeature_RNA > 500 & nFeature_RNA < 9000 & nCount_RNA < 1e5 & doub_values < .76 & percent.mt < 10)
+
+
+ssc_em1
+
+
+```
+
+
+
+
+```{r}
+
+ssc_em2.data <- Read10X(data.dir = "~/Dropbox (University of Oregon)/Hope_Dissertation_Folder/SingleCell/Ssc_single_cell/211210_Experiment/230122_CellRanger_EM2-pouchEMB-sscMT/filtered_feature_bc_matrix/")
+
+# Initialize the Seurat object with the raw (non-normalized data).
+ssc_em2 <- CreateSeuratObject(counts = ssc_em2.data, project = "ssc_em2")
+
+
+# Initialize the Seurat object with the raw (non-normalized data).
+plot2 <- FeatureScatter(ssc_em2, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+plot2
+
+ssc_em2 <- SCTransform(ssc_em2, verbose = TRUE)
+ssc_em2
+
+ssc_em2 <- RunPCA(ssc_em2, verbose = TRUE)
+ElbowPlot(object = ssc_em2, ndims=50)
+ssc_em2 <- RunUMAP(ssc_em2, dims = 1:13, verbose = FALSE)
+ssc_em2 <- FindNeighbors(ssc_em2, dims = 1:13, verbose = FALSE)
+ssc_em2 <- FindClusters(ssc_em2, verbose = FALSE)
+
+library(gridExtra)
+
+
+UMAPssc_em2 <- DimPlot(ssc_em2, label = TRUE, label.size = 6) 
+UMAPssc_em2
+
+#####Removing extraneous RNA from the soup with soupX
+library(SoupX)
+ssc_em2_raw.data <- Read10X(data.dir = "~/Dropbox (University of Oregon)/Hope_Dissertation_Folder/SingleCell/Ssc_single_cell/211210_Experiment/230122_CellRanger_EM2-pouchEMB-sscMT/raw_feature_bc_matrix/")
+sc2 <- SoupChannel(ssc_em2_raw.data, ssc_em2.data, calcSoupProfile = FALSE)
+sc2 <- estimateSoup(sc2)
+
+ssc_em2.data <- sc2$toc
+
+scNoDrops2 <- SoupChannel(ssc_em2_raw.data, ssc_em2.data, calcSoupProfile = FALSE)
+
+soupProf2 <- data.frame(row.names = rownames(ssc_em2.data), est=rowSums(ssc_em2.data)/sum(ssc_em2.data), counts = rowSums(ssc_em2.data))
+
+scNoDrops2 <- setSoupProfile(scNoDrops2, soupProf2)
+
+meta2 <- ssc_em2@meta.data
+umap2 <- ssc_em2@reductions$umap@cell.embeddings
+
+names2 <- setNames(meta2$seurat_clusters, rownames(meta2))
+
+sc2$metaData
+
+length(sc2$toc@Dimnames[[2]])
+
+length(names2)
+sc2 <- setClusters(sc2, names2)
+
+sc2 <- autoEstCont(sc2)
+
+head(sc$soupProfile[order(sc2$soupProfile$est, decreasing = T), ], n = 50)
+
+out2 <- adjustCounts(sc2)
+
+ssc_em2 <- CreateSeuratObject(counts = out2, project = "ssc_em2")
+
+
+
+####getting rid of doublets
+ssc_em2_doublet_scores <- read.table("~/Dropbox (University of Oregon)/Hope_Dissertation_Folder/SingleCell/Ssc_single_cell/211210_Experiment/230122_CellRanger_EM2-pouchEMB-sscMT/doublet_scores.txt")
+
+ssc_em2_doublet_scores$doub <-ssc_em2_doublet_scores$V1 > .23
+colnames(ssc_em2_doublet_scores) <- c("values", "doub")
+
+
+ssc_em2@meta.data$doub_values <- ssc_em2_doublet_scores$values
+ssc_em2@meta.data$doub_true <- ssc_em2_doublet_scores$doub
+ssc_em2@meta.data$fish <- "ssc"
+
+FeatureScatter(ssc_em2, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+FeatureScatter(ssc_em2, feature1 = "nFeature_RNA", feature2 = "doub_values")
+FeatureScatter(ssc_em2, feature1 = "nCount_RNA", feature2 = "doub_values")
+
+
+ssc_em2[['QC']] <- ifelse(ssc_em2@meta.data$doub_true == 'True','Doublet','Pass')
+ssc_em2[['QC']] <- ifelse(ssc_em2@meta.data$nFeature_RNA < 500 & ssc_em2@meta.data$QC == 'Pass','Low_nFeature',ssc_em2@meta.data$QC)
+ssc_em2[['QC']] <- ifelse(ssc_em2@meta.data$nFeature_RNA < 500 & ssc_em2@meta.data$QC != 'Pass' & ssc_em2@meta.data$QC != 'Low_nFeature',paste('Low_nFeature',ssc_em2@meta.data$QC,sep = ','),ssc_em2@meta.data$QC)
+table(ssc_em2[['QC']])
+
+ssc_em2[["percent.mt"]] <- PercentageFeatureSet(ssc_em2, pattern = "^MT-")
+VlnPlot(ssc_em2, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+
+ssc_em2 <- subset(ssc_em2, subset = nFeature_RNA > 500 & nFeature_RNA < 9000 & nCount_RNA < 1e5 & doub_values < .23 & percent.mt<10)
+
+ssc_em2
+
+```
+
+## Transforming the datasets
+
+Using the seurat pipeline, we normalized the two scovelli datasets by first using sctransform which uses negative binomial regression to normalize the counts. We then saved each dataset separately after the quality control and normalization process.
+
+```{r}
+
+ssc_em1 <- SCTransform(ssc_em1)
+ssc_em2 <- SCTransform(ssc_em2)
+
+ssc_em1@meta.data$sample <- "1"
+ssc_em2@meta.data$sample <- "2"
+
+ssc_em1@meta.data$fish <- "ssc"
+ssc_em2@meta.data$fish <- "ssc"
+
+ssc_em1@meta.data$age <- "unk1"
+ssc_em2@meta.data$age <- "unk2"
+
+saveRDS(ssc_em1, file = "230123_pipefish_EM1_soup_doub.rds")
+saveRDS(ssc_em2, file = "230123_pipefish_EM2_soup_doub.rds")
+```
+
+## Integrating the data
+
+We uploaded the filtered, normalized data then proceeded (this allows the user to not run the above chunks). We identified integration features, found cell anchors, and integrated the two datasets. We completed a PCA, then found neighbors, clusters, and plotted a UMAP. We tried several different PCs (18,30,35,40) for this analysis and settled on 30 PCs which gives 38 clusters. We chose PCs to test using the Elbow Plot then examined the resulting clustering for proper separation of cell types. 
+
+```{r}
+ssc_em1 <- readRDS("230123_pipefish_EM1_soup_doub.rds")
+ssc_em2 <- readRDS("230123_pipefish_EM2_soup_doub.rds")
+
+
+pipefish <- list(ssc_em1, ssc_em2)
+options(future.globals.maxSize = 8000 * 1024^2)
+
+
+fishes.features <- SelectIntegrationFeatures(object.list = pipefish, nfeatures = 3000)
+pipefish <- PrepSCTIntegration(object.list = pipefish, anchor.features = fishes.features, 
+    verbose = TRUE)
+
+fish.anchors <- FindIntegrationAnchors(object.list = pipefish, normalization.method = "SCT", 
+    anchor.features = fishes.features, verbose = TRUE)
+pipefish.integrated <- IntegrateData(anchorset = fish.anchors, normalization.method = "SCT", 
+    verbose = TRUE)
+
+pipefish.integrated <- RunPCA(pipefish.integrated, verbose = FALSE)
+ElbowPlot(object = pipefish.integrated, ndims=50)
+DefaultAssay(pipefish.integrated) <- "integrated"
+
+pipefish.integrated <- FindNeighbors(pipefish.integrated, dims = 1:30, verbose = FALSE)
+pipefish.integrated <- FindClusters(pipefish.integrated, verbose = TRUE)
+pipefish.integrated <- RunUMAP(pipefish.integrated, dims = 1:30)
+plots <- DimPlot(pipefish.integrated, label = TRUE, label.size = 6)
+plots 
+
+plots <- DimPlot(pipefish.integrated, label = TRUE, label.size = 6, group.by = c("seurat_clusters", "sample"))
+plots 
+
+
+library(gridExtra)
+```
+
+
+```{r}
+saveRDS(pipefish.integrated, file = "230503_pipefish_EM1_EM2_integrated_soup_doub.rds")
+```
+
+## Identifying Cluster Identites
+
+We re-uploaded the data and set the default assay to RNA for the below analyses to identify cell types. We used marker genes identified through the literature and those identified in the analysis to give the cells their identities.
+
+```{r, fig.width=10, fig.height=8}
+pipefish.integrated <- readRDS("230503_pipefish_EM1_EM2_integrated_soup_doub.rds")
+DefaultAssay(pipefish.integrated) <- "RNA"
+
+pipefish.integrated
+```
+
+First, we created and exported a table with the number of cells per cluster.
+
+```{r}
+pipefish.integrated.cell_counts <- table(pipefish.integrated$seurat_clusters)
+write.table(pipefish.integrated.cell_counts, "CellClusterIdentification_files/230818_Cell_Cluster_Sizes.txt")
+```
+
+### Importing new NCBI annotation information
+
+Since the creation of the atlas, new gene annotations for the Gulf Pipefish have been released. We imported those annotations below.
+
+```{r}
+library(dplyr)
+library(tidyr)
+library(ape)
+
+annots <- read.gff("Dropbox (University of Oregon)/Resources/Genomes_and_RNAseq_files/2022_Ssc_genome/2022_NCBI_assemb/genomic.gff")
+
+
+map_prot <- function(gff){
+  gff <- read.gff(gff) %>% 
+    filter(type == "CDS") %>% 
+    select(seqid,attributes) %>% 
+    separate(attributes, sep=";", into = c("a","b","c","d","e","f","g","h")) %>% 
+    mutate(gene = sub("gene=","",f)) %>% 
+    mutate(protein = sub("ID=cds-","",a)) %>% 
+    mutate(transcript = sub("Parent=rna-","",b)) %>% 
+    mutate(desc = sub("product=","",g)) %>% 
+    select(seqid,gene,protein,transcript,desc) %>% 
+    distinct()
+  return(gff)
+}
+species_gff <- map_prot("Dropbox (University of Oregon)/Resources/Genomes_and_RNAseq_files/2022_Ssc_genome/2022_NCBI_assemb/230303_GCF_024217435.1_RoL_Ssco_1.1_genomic.gff")
+
+write.csv(species_gff, file = "Dropbox (University of Oregon)/Resources/Genomes_and_RNAseq_files/2022_Ssc_genome/2022_NCBI_assemb/NCBI_gene_table.csv")
+```
+
+We re-uploaded the species gff table and also uploaded a gene names table. The gene name table originated from one of our scripts that took the new NCBI annotation file and isolated only the gene ids and gene names. Both of these files were helpful for identifying cell types.
+
+```{r}
+species_gff <- read.csv("/Users/hopehealey/Dropbox (University of Oregon)/Resources/Genomes_and_RNAseq_files/2022_Ssc_genome/2022_NCBI_assemb/NCBI_gene_table.csv")
+gene_names <- read.csv("/Users/hopehealey/Dropbox (University of Oregon)/Resources/Genomes_and_RNAseq_files/2022_Ssc_genome/2022_NCBI_assemb/230313_GCF_024217435.1_RoL_Ssco_1.1_Gene_Name_ID_conversion.csv")
+colnames(gene_names) <- c("gene", "gene_name")
+```
+
+### Identifying marker genes
+
+We used Seurat's FindAllMarkers tool to identify markers for each cluster. We set the parameters of this function such only genes upregulated and had a log fold change of .25 or higher for the cluster were listed as markers. We merged this with the gff table and the gene name table and exported this for analysis outside of R. We also then separated out the file into the tables from different clusters.
+
+To identify cluster identities with these identified markers, we first turned to zfin, the scRNAseq zebrafish atlas from the Miller lab and the atlas from the Royer Lab, NCBI, GeneCards, and medlineplus.gov. We searched for the gene and looked to see if it was specifically found in a structure.
+
+```{r}
+#finding marker genes
+DefaultAssay(pipefish.integrated) <- "RNA"
+pipefish.markers <- FindAllMarkers(pipefish.integrated, only.pos = TRUE,logfc.threshold = 0.25)
+write_csv(pipefish.markers, "~/Dropbox (University of Oregon)/Hope_Dissertation_Folder/SingleCell/Ssc_single_cell/211210_Experiment/230122_CellRanger_EM2-pouchEMB-sscMT/230502_pipefish_marker_genes.csv")
+
+species_gff_uniq <- species_gff[!duplicated(species_gff[ , c("gene")]), ]
+pipefish.markers.info <-merge(pipefish.markers, species_gff_uniq)
+pipefish.markers.info <-merge(pipefish.markers, gene_names, by = "gene", all.x=TRUE, sort=FALSE)
+markers <- read_csv("~/Dropbox (University of Oregon)/Hope_Dissertation_Folder/SingleCell/Ssc_single_cell/211210_Experiment/230122_CellRanger_EM2-pouchEMB-sscMT/230502_pipefish_marker_genes.csv")
+
+colnames(gene_names) <- c("gene", "gene_name", all.x=TRUE, sort=FALSE)
+cell_markers <- merge(markers, gene_names, by = "gene")
+write_csv(cell_markers, "~/Dropbox (University of Oregon)/Hope_Dissertation_Folder/SingleCell/Ssc_single_cell/211210_Experiment/230122_CellRanger_EM2-pouchEMB-sscMT/230502_pipefish_marker_genes.csv")
+
+##that didn't find any genes for cluster 11 so I will try that separetly 
+clust11_markers <- FindMarkers(pipefish.integrated, "11")
+
+##separating the clusters out
+for (i in 0:38) {
+  Cluster <- subset(pipefish.markers.info, cluster==i)
+  assign(paste("cluster", i, sep=""), Cluster)
+}
+
+```
+
+### KEGG analysis
+
+Gulf pipefish was recntly added to the KEGG database which allows us to do KEGG pathway analyses! It is unfortuantely too new to be found in the cluster profiler database, so we need to use other methods to get started. We first used keggConv to convert NCBI ids to KEGG ids for scovelli. With this method, we can copy the list and use https://www.kegg.jp/kegg/mapper/color.html to see which pathways and where in the pathways the genes were present. 
+
+We also referenced this linked tutorial (https://ucdavis-bioinformatics-training.github.io/2018-June-RNA-Seq-Workshop/friday/enrichment.html) to complete the KEGG analysis usng a Wilcoxon enrichment test. This test asked whethere marker genes for a cluster are significantly encriched for particular KEGG pathways. 
+
+```{r}
+#library(clusterProfiler)
+library(KEGGREST)
+
+markers <- read.csv("~/Dropbox (University of Oregon)/Hope_Dissertation_Folder/SingleCell/Ssc_single_cell/211210_Experiment/230122_CellRanger_EM2-pouchEMB-sscMT/230502_pipefish_marker_genes.csv")
+markers$ncbi_id <- markers$gene
+markers$ncbi_id <- gsub("LOC", "", as.character(markers$ncbi_id))
+write.csv(markers, "~/Dropbox (University of Oregon)/Hope_Dissertation_Folder/SingleCell/Ssc_single_cell/211210_Experiment/230122_CellRanger_EM2-pouchEMB-sscMT/230502_pipefish_marker_genes.csv")
+
+kegg_mappings <- as.data.frame(keggConv("sscv", "ncbi-geneid"))
+kegg_mappings$ncbi_id <- rownames(kegg_mappings)
+kegg_mappings$ncbi_id <- gsub("ncbi-geneid:", "", as.character(kegg_mappings$ncbi_id))
+
+markers_w_kegg <- merge(markers, kegg_mappings, by="ncbi_id")
+markers_w_kegg$staight_keg_ids <- markers_w_kegg$`keggConv("sscv", "ncbi-geneid")`
+markers_w_kegg$staight_keg_ids <- gsub("sscv:", "", as.character(markers_w_kegg$staight_keg_ids))
+write.csv(markers_w_kegg, "~/Dropbox (University of Oregon)/Hope_Dissertation_Folder/SingleCell/Ssc_single_cell/211210_Experiment/230122_CellRanger_EM2-pouchEMB-sscMT/230502_pipefish_marker_genes_wkegg.csv")
+
+##separating markers out by cluster for the below analysis
+for (i in 0:38) {
+  Cluster <- subset(markers_w_kegg, cluster==i)
+  assign(paste("cluster", i, sep=""), Cluster)
+}
+
+#### following this tutorial for the kegg enrichment analysis https://ucdavis-bioinformatics-training.github.io/2018-June-RNA-Seq-Workshop/friday/enrichment.html
+#first, finding the different pathways
+pathways.list <- keggList("pathway", "sscv")
+head(pathways.list)
+
+# Pulling all genes for each pathway
+pathway.codes <- sub("path:", "", names(pathways.list)) 
+
+pathway_breakdown <- function(pathway_name) {
+  pw <- keggGet(pathway_name)
+        if (is.null(pw[[1]]$GENE)) return(NA)
+        pw2 <- pw[[1]]$GENE[c(TRUE,FALSE)] 
+        pw2 <- unlist(lapply(strsplit(pw2, split = ";", fixed = T), function(x)x[1]))
+        return(pw2)
+}
+genes.by.pathway <- sapply(pathway.codes, pathway_breakdown)
+
+#Initially tested this on one cluster
+cluster20 <- subset(markers_w_kegg, cluster == "20")
+geneList <- cluster20$p_val_adj
+names(geneList) <- cluster20$staight_keg_ids
+head(geneList)
+
+# Wilcoxon test for each pathway
+enrich_test_pathway <- function(pathway) {
+        pathway.genes <- genes.by.pathway[[pathway]]
+        list.genes.in.pathway <- intersect(names(geneList), pathway.genes)
+        list.genes.not.in.pathway <- setdiff(names(geneList), list.genes.in.pathway)
+        scores.in.pathway <- geneList[list.genes.in.pathway]
+        scores.not.in.pathway <- geneList[list.genes.not.in.pathway]
+        if (length(scores.in.pathway) > 0){
+            p.value <- wilcox.test(scores.in.pathway, scores.not.in.pathway, alternative = "less")$p.value
+            print(p.value)
+        } else{
+            p.value <- NA
+        }
+        return(c(p.value = p.value, Annotated = length(list.genes.in.pathway)))
+    }
+
+pVals.by.pathway <- t(sapply(names(genes.by.pathway), enrich_test_pathway))
+
+# Assemble output table
+outdat <- data.frame(pathway.code = rownames(pVals.by.pathway))
+outdat$pathway.name <- pathways.list[outdat$pathway.code]
+outdat$p.value <- pVals.by.pathway[,"p.value"]
+outdat$Annotated <- pVals.by.pathway[,"Annotated"]
+outdat <- outdat[order(outdat$p.value),]
+outdat <- subset(outdat, p.value<.05)
+head(outdat)
+
+### Great with the example of pigment cells, we can see that the most enriched pathway name is Melanogenesis
+### that gives us good confidence to continue and try to make a loop out of the things above
+
+###### Analyzing all of the cell clusters ###########
+markers_w_kegg <- read.csv("KEGG_analysis/230502_pipefish_marker_genes_wkegg_color_names.csv")
+##These are the colors chosen for each cluster
+#mycolors <- c("1"="red", "19"="tomato4", "32"="tomato1", "30"="lightyellow2", "21"="lightyellow3", "2"="springgreen4", "17"="springgreen", "37"="olivedrab", "10"="palegreen1", "20"="orange", "34"="yellow1", "14"="palegreen4", "36"="indianred2", "23"="lightsalmon", "18"="violetred3", "4"="thistle2", "27"="maroon2", "5"="plum2", "28"="magenta3", "6"="orchid2", "9"="mediumpurple4","16"="chocolate4", "15"="mediumpurple2", "29"="purple3", "24"="magenta4", "31"="gray2", "8"="paleturquoise2", "3"="cadetblue3", "25"="midnightblue", "0"="cadetblue4", "7"="skyblue3", "13"="pink3", "12"="steelblue4", "22"="slateblue4", "33"="royalblue2", "26"="mistyrose", "35"="navy", "11"= "grey")
+
+markers_w_kegg$Color_picked[markers_w_kegg$cluster == 0] <- "cadetblue4" 
+markers_w_kegg$Color_picked[markers_w_kegg$cluster == 1] <- "red" 
+markers_w_kegg$Color_picked[markers_w_kegg$cluster == 2] <- "springgreen4" 
+markers_w_kegg$Color_picked[markers_w_kegg$cluster == 3] <- "cadetblue3" 
+markers_w_kegg$Color_picked[markers_w_kegg$cluster == 4] <- "thistle2" 
+markers_w_kegg$Color_picked[markers_w_kegg$cluster == 5] <- "plum2" 
+markers_w_kegg$Color_picked[markers_w_kegg$cluster == 6] <- "orchid2" 
+markers_w_kegg$Color_picked[markers_w_kegg$cluster == 7] <- "skyblue3" 
+markers_w_kegg$Color_picked[markers_w_kegg$cluster == 8] <- "paleturquoise2" 
+markers_w_kegg$Color_picked[markers_w_kegg$cluster == 9] <- "mediumpurple4" 
+markers_w_kegg$Color_picked[markers_w_kegg$cluster == 10] <- "palegreen1" 
+markers_w_kegg$Color_picked[markers_w_kegg$cluster == 11] <- "grey" 
+markers_w_kegg$Color_picked[markers_w_kegg$cluster == 12] <- "steelblue4" 
+markers_w_kegg$Color_picked[markers_w_kegg$cluster == 13] <- "pink3" 
+markers_w_kegg$Color_picked[markers_w_kegg$cluster == 14] <- "indianred2" 
+markers_w_kegg$Color_picked[markers_w_kegg$cluster == 15] <- "mediumpurple2" 
+markers_w_kegg$Color_picked[markers_w_kegg$cluster == 16] <- "chocolate4" 
+markers_w_kegg$Color_picked[markers_w_kegg$cluster == 17] <- "springgreen" 
+markers_w_kegg$Color_picked[markers_w_kegg$cluster == 18] <- "violetred3" 
+markers_w_kegg$Color_picked[markers_w_kegg$cluster == 19] <- "tomato4" 
+markers_w_kegg$Color_picked[markers_w_kegg$cluster == 20] <- "orange" 
+markers_w_kegg$Color_picked[markers_w_kegg$cluster == 21] <- "lightyellow3" 
+markers_w_kegg$Color_picked[markers_w_kegg$cluster == 22] <- "slateblue4" 
+markers_w_kegg$Color_picked[markers_w_kegg$cluster == 23] <- "lightsalmon" 
+markers_w_kegg$Color_picked[markers_w_kegg$cluster == 24] <- "magenta4" 
+markers_w_kegg$Color_picked[markers_w_kegg$cluster == 25] <- "midnightblue" 
+markers_w_kegg$Color_picked[markers_w_kegg$cluster == 26] <- "mistyrose" 
+markers_w_kegg$Color_picked[markers_w_kegg$cluster == 27] <- "maroon2" 
+markers_w_kegg$Color_picked[markers_w_kegg$cluster == 28] <- "magenta3" 
+markers_w_kegg$Color_picked[markers_w_kegg$cluster == 29] <- "purple3" 
+markers_w_kegg$Color_picked[markers_w_kegg$cluster == 30] <- "lightyellow2" 
+markers_w_kegg$Color_picked[markers_w_kegg$cluster == 31] <- "gray2" 
+markers_w_kegg$Color_picked[markers_w_kegg$cluster == 32] <- "tomato1" 
+markers_w_kegg$Color_picked[markers_w_kegg$cluster == 33] <- "royalblue2" 
+markers_w_kegg$Color_picked[markers_w_kegg$cluster == 34] <- "yellow1" 
+markers_w_kegg$Color_picked[markers_w_kegg$cluster == 35] <- "navy" 
+markers_w_kegg$Color_picked[markers_w_kegg$cluster == 36] <- "palegreen4" 
+markers_w_kegg$Color_picked[markers_w_kegg$cluster == 37] <- "olivedrab" 
+
+
+#create data frame with 0 rows and 5 columns
+kegg_df <- data.frame(matrix(ncol = 5, nrow = 0))
+#provide column names
+colnames(kegg_df) <- c("pathway.code","pathway.name", "p.value", "Annotated", "Plotting_color")
+
+for (i in 0:38) {
+  Cluster <- subset(markers_w_kegg, cluster==i)
+  print(nrow(Cluster))
+  #assign(paste("cluster", i, sep=""), Cluster)
+  geneList <- Cluster$p_val_adj
+  names(geneList) <- Cluster$staight_keg_ids
+  pVals.by.pathway <- t(sapply(names(genes.by.pathway), enrich_test_pathway))
+
+  # Assemble output table
+  outdat <- data.frame(pathway.code = rownames(pVals.by.pathway))
+  outdat$pathway.name <- pathways.list[outdat$pathway.code]
+  outdat$p.value <- pVals.by.pathway[,"p.value"]
+  outdat$Annotated <- pVals.by.pathway[,"Annotated"]
+  outdat <- outdat[order(outdat$p.value),]
+  outdat <- subset(outdat, p.value<.05)
+  #assign(paste("KEGG_Pathway:cluster", i, sep=""), outdat)
+
+  if (nrow(outdat) > 1) {
+    #rint(outdat)
+    outdat$Plotting_color <- unique(Cluster$Color_picked)
+    outdat$cluster <- i
+    outdat$pathway.name <- gsub("(Gulf pipefish)", "",  as.character(outdat$pathway.name))
+    outdat$pathway.name <- gsub("Sygnathus", "",  as.character(outdat$pathway.name))
+    outdat$pathway.name <- gsub("scovelli", "",  as.character(outdat$pathway.name))
+    outdat$pathway.name <- gsub("Syngnathus", "",  as.character(outdat$pathway.name))
+    outdat$pathway.name <- gsub("-", "",  as.character(outdat$pathway.name))
+    outdat$pathway.name <- gsub("[()]", "",  as.character(outdat$pathway.name))
+    
+    ggplot(outdat,aes(pathway.name,Annotated))+geom_bar(stat="identity", fill=outdat$Plotting_color) + ggtitle(i)
+    kegg_df <- rbind(kegg_df, outdat)
+    
+    ##outputting the graph into another file
+    myfile_name <- paste("KEGG_analysis/230818_KEGG_by_Cell_Cluster_", i, ".pdf", sep="")
+  
+    pdf(file = myfile_name,   # the file name
+    width = 20, # The width of the plot in inches
+    height = 20) # The height of the plot in inches
+    kegg_graph <- ggplot(outdat,aes(pathway.name,Annotated)) + geom_bar(stat="identity", fill=outdat$Plotting_color, color="black",size=2) + theme(axis.text.x = element_text(angle = 90, size = 25, hjust=1, vjust=.2),axis.text.y = element_text(angle = 90, size = 25, hjust=.6), axis.title.y = element_text(size=30, face="bold"), plot.title = element_text(size=35, face="bold", hjust=.5), panel.background = element_rect(fill="white"), axis.line = element_line(linewidth = 0.5, linetype = "solid",colour = "black")) +  xlab("") + ylab("Annotated Genes in Pathway") + ggtitle(i)
+    print(kegg_graph)
+    dev.off()
+    
+  }
+}
+
+write.csv(kegg_df, "~/Dropbox (University of Oregon)/Hope_Dissertation_Folder/SingleCell/Ssc_single_cell/211210_Experiment/230120_ssc_emb1_embpouchISO_sscMT/KEGG_analysis/230502_KEGG_enriched_pathways_ssc.csv")
+```
+
+Next, we analyzed the results for all of them. For the supplemental figure in the paper, we used the "selective" approach which required clusters to have at least 3 genes in each pathway and selectively removed certain pathways from the analysis.
+
+```{r, fig.height=10}
+
+kegg_df <- read.csv("~/Dropbox (University of Oregon)/Hope_Dissertation_Folder/SingleCell/Ssc_single_cell/211210_Experiment/230120_ssc_emb1_embpouchISO_sscMT/KEGG_analysis/230502_KEGG_enriched_pathways_ssc.csv")
+
+##Cleaning up the dataframe:
+kegg_df$pathway.name <- gsub("(Gulf pipefish)", "",  as.character(kegg_df$pathway.name))
+kegg_df$pathway.name <- gsub("Sygnathus", "",  as.character(kegg_df$pathway.name))
+kegg_df$pathway.name <- gsub("scovelli", "",  as.character(kegg_df$pathway.name))
+kegg_df$pathway.name <- gsub("Syngnathus", "",  as.character(kegg_df$pathway.name))
+kegg_df$pathway.name <- gsub("-", "",  as.character(kegg_df$pathway.name))
+kegg_df$pathway.name <- gsub("[()]", "",  as.character(kegg_df$pathway.name))
+
+kegg_df$TextCol[kegg_df$cluster==30] <- "black"
+kegg_df$TextCol[kegg_df$cluster==26] <- "black"
+kegg_df$TextCol[kegg_df$cluster==21] <- "black"
+
+###### A few methods to subset
+## Attempt 1: requiring pathways to have 10 or more genes
+myfile_name <- paste("KEGG_analysis/230818_KEGG_All_10plusGenes", ".pdf", sep="")
+pdf(file = myfile_name,   # the file name
+    width = 50, # The width of the plot in inches
+    height = 30) # The height of the plot in inches
+
+kegg_df_10orMore <- subset(kegg_df, Annotated > 10)
+
+col <- as.character(kegg_df_10orMore$Plotting_color)
+names(col) <- as.character(kegg_df_10orMore$cluster)
+
+col2 <- as.character(kegg_df_10orMore$TextCol)
+names(col2) <- as.character(kegg_df_10orMore$cluster)
+
+
+ggplot(kegg_df_10orMore, aes(pathway.name, Annotated,fill=factor(cluster))) + geom_bar(stat="identity") + theme(axis.text.x = element_text(angle = 90, size = 25, hjust=1, vjust=.2,family = "Arial"), panel.background = element_rect(fill = "white", colour = "black", size = 0.5, linetype = "solid"),axis.text.y = element_text(angle = 90, size = 25, hjust=.6), axis.title.y = element_text(size=30, face="bold"), plot.title = element_text(size=35, face="bold", hjust=.5)) +  xlab("") + ylab("Annotated Genes in Pathway") + scale_fill_manual(values = unique(kegg_df_10orMore$Plotting_color)) + geom_text(size = 5, position = position_stack(vjust = 0.5), label=kegg_df_selective$cluster, colour = col2)
+  
+dev.off()
+
+####### Attempt 2: requiring the pvalue to be below .005
+myfile_name <- paste("KEGG_analysis/230818_KEGG_All_.005", ".pdf", sep="")
+pdf(file = myfile_name,   # the file name
+    width = 50, # The width of the plot in inches
+    height = 30) # The height of the plot in inches
+
+kegg_df_005 <- subset(kegg_df, p.value < .005)
+
+col <- as.character(kegg_df_005$Plotting_color)
+names(col) <- as.character(kegg_df_005$cluster)
+
+col2 <- as.character(kegg_df_005$TextCol)
+names(col2) <- as.character(kegg_df_005$cluster)
+
+ggplot(kegg_df_005, aes(pathway.name, Annotated,fill=factor(cluster))) + geom_bar(stat="identity") + theme(axis.text.x = element_text(angle = 90, size = 25, hjust=1, vjust=.2,family = "Arial"), panel.background = element_rect(fill = "white", colour = "black", size = 0.5, linetype = "solid"),axis.text.y = element_text(angle = 90, size = 25, hjust=.6), axis.title.y = element_text(size=30, face="bold"), plot.title = element_text(size=35, face="bold", hjust=.5)) +  xlab("") + ylab("Annotated Genes in Pathway") + scale_fill_manual(values = unique(kegg_df_005$Plotting_color)) + geom_text(size = 5, position = position_stack(vjust = 0.5), label=kegg_df_selective$cluster, colour = col2)
+
+dev.off()
+
+#### Attempt 3: selectively removing certain pathways and requiring 2+ genes
+myfile_name <- paste("KEGG_analysis/230818_KEGG_selectivepathways", ".pdf", sep="")
+pdf(file = myfile_name,   # the file name
+    width = 50, # The width of the plot in inches
+    height = 30) # The height of the plot in inches
+
+kegg_df_selective <- kegg_df[grep("Virion", kegg_df$pathway.name, invert=TRUE),]
+kegg_df_selective <- kegg_df_selective[grep("infection", kegg_df_selective$pathway.name, invert=TRUE),]
+kegg_df_selective <- kegg_df_selective[grep("metabolism", kegg_df_selective$pathway.name, invert=TRUE),]
+kegg_df_selective <- kegg_df_selective[grep("Metabolism", kegg_df_selective$pathway.name, invert=TRUE),]
+kegg_df_selective <- kegg_df_selective[grep("iosynthesis", kegg_df_selective$pathway.name, invert=TRUE),]
+kegg_df_selective <- kegg_df_selective[grep("degradation", kegg_df_selective$pathway.name, invert=TRUE),]
+kegg_df_selective <- kegg_df_selective[grep("animal", kegg_df_selective$pathway.name, invert=TRUE),]
+kegg_df_selective <- subset(kegg_df_selective, Annotated > 2)
+
+col <- as.character(kegg_df_selective$Plotting_color)
+names(col) <- as.character(kegg_df_selective$cluster)
+
+col2 <- as.character(kegg_df_selective$TextCol)
+names(col2) <- as.character(kegg_df_selective$cluster)
+
+ggplot(kegg_df_selective, aes(pathway.name, Annotated,fill=factor(cluster))) + geom_bar(stat="identity") + theme(axis.text.x = element_text(angle = 90, size = 35, hjust=1, vjust=.2,family = "sans", face = "bold"), panel.background = element_rect(fill = "white", colour = "black", size = 0.5, linetype = "solid"),axis.text.y = element_text(angle = 90, size = 40, hjust=.6), axis.title.y = element_text(size=50, face="bold"), plot.title = element_text(size=40, face="bold", hjust=.5), legend.position = "none") +  xlab("") + 
+  ylab("Annotated Genes in Pathway") + scale_fill_manual(values = col) + 
+  geom_text(size = 8, position = position_stack(vjust = 0.5), label=kegg_df_selective$cluster, colour = col2) 
+
+dev.off()
+
+```
+
+We, next, examined the results using the broad tissue classifications.
+
+```{r}
+###generating smaller plots for groups of clusters:
+myfile_name <- paste("KEGG_analysis/230818_KEGG_by_Cell_Classes", ".pdf", sep="")
+pdf(file = myfile_name,   # the file name
+    width = 24, # The width of the plot in inches
+    height = 20) # The height of the plot in inches
+
+muscle_clust_kegg <- subset(kegg_df, cluster %in% c("2","10","17", "36", "37"))
+ggplot(muscle_clust_kegg,aes(pathway.name,Annotated,fill=factor(cluster))) + geom_bar(stat="identity") + theme(axis.text.x = element_text(angle = 90, size = 25, hjust=1, vjust=.2), panel.background = element_rect(fill = "white", colour = "black", size = 0.5, linetype = "solid"),axis.text.y = element_text(angle = 90, size = 25, hjust=.6), axis.title.y = element_text(size=30, face="bold"), plot.title = element_text(size=35, face="bold", hjust=.5)) + scale_fill_manual(values = c("springgreen4", "palegreen1", "springgreen", "palegreen4", "olivedrab")) +  xlab("") + ylab("Annotated Genes in Pathway") + ggtitle("Ssc Muscle Cell Types KEGG Pathways")
+
+
+neural_clust_kegg <- subset(kegg_df, cluster %in% c("33", "25", "12", "8", "7", "3", "0"))
+ggplot(neural_clust_kegg,aes(pathway.name,Annotated,fill=factor(cluster))) + geom_bar(stat="identity") + theme(axis.text.x = element_text(angle = 90, size = 25, hjust=1, vjust=.2), panel.background = element_rect(fill = "white", colour = "black", size = 0.5, linetype = "solid"),axis.text.y = element_text(angle = 90, size = 25, hjust=.6), axis.title.y = element_text(size=30, face="bold"), plot.title = element_text(size=35, face="bold", hjust=.5)) + scale_fill_manual(values=c("cadetblue3", "skyblue3", "paleturquoise2", "steelblue4", "midnightblue", "royalblue2")) +  xlab("") + ylab("Annotated Genes in Pathway") + ggtitle("Ssc Neural Cell Types KEGG Pathways")
+
+
+connective_clust_kegg <- subset(kegg_df, cluster %in% c("29", "28", "27", "26", "24", "18", "16", "11", "15", "9", "6", "5", "4", "14"))
+ggplot(connective_clust_kegg,aes(pathway.name,Annotated,fill=factor(cluster))) + geom_bar(stat="identity") + theme(axis.text.x = element_text(angle = 90, size = 25, hjust=1, vjust=.2), panel.background = element_rect(fill = "white", colour = "black", size = 0.5, linetype = "solid"),axis.text.y = element_text(angle = 90, size = 25, hjust=.6), axis.title.y = element_text(size=30, face="bold"), plot.title = element_text(size=35, face="bold", hjust=.5)) +  xlab("") + ylab("Annotated Genes in Pathway") + ggtitle("Ssc Connective Tissue Cell Types KEGG Pathways") + scale_fill_manual(values = c("plum2", "indianred2", "chocolate4","violetred3", "mistyrose", "maroon2", "magenta3", "purple3")) 
+
+ 
+blood_clust_kegg <- subset(kegg_df, cluster %in% c("32", "19", "1"))
+ggplot(blood_clust_kegg,aes(pathway.name,Annotated,fill=factor(cluster))) + geom_bar(stat="identity") + theme(axis.text.x = element_text(angle = 90, size = 25, hjust=1, vjust=.2), panel.background = element_rect(fill = "white", colour = "black", size = 0.5, linetype = "solid"),axis.text.y = element_text(angle = 90, size = 25, hjust=.6), axis.title.y = element_text(size=30, face="bold"), plot.title = element_text(size=35, face="bold", hjust=.5)) +  xlab("") + ylab("Annotated Genes in Pathway") + ggtitle("Ssc Red/White Blood Cell Types KEGG Pathways") + scale_fill_manual(values=c("tomato1"))
+dev.off()
+```
+
+### Alternative marker gene approach
+
+In addition to completing the Seurat marker gene analysis, we completed a secondary marker gene analysis. In this analysis, we gathered the gene names for every gene then completed a dotplot containing all of these genes. Using the dotplot, we extracted potential marker genes. These genes were required to have expression in 60% of cells in the cluster and be expressed in less than 10% of cells in each other cluster.
+
+```{r}
+AV_Clus <- AverageExpression(pipefish.integrated, assay="RNA")
+AV_Clus_RNA <- as.data.frame(AV_Clus$RNA)
+AV_Dot <- DotPlot(pipefish.integrated, features = rownames(AV_Clus_RNA))
+
+dotdata_relevant <- AV_Dot$data
+
+gene_names <- na.omit(as.character(unique(dotdata_relevant$features.plot)))
+
+
+'%!in%' <- function(x,y)!('%in%'(x,y))
+
+other_markers <- data.frame(genes=character(),
+                 Identity=factor(), 
+                 Pct.exp_clus=factor(), 
+                 Pct.exp_back=factor()) 
+
+for (j in unique(Idents(object = pipefish.integrated))) {
+pct.exp_clus <- c(60)
+pct.background <- c(10)
+
+for (val in pct.exp_clus) {
+one_clust <- subset(dotdata_relevant, id == j & pct.exp > val)
+possible_genes <- as.character(one_clust$features.plot)
+
+for (back in pct.background) {
+sub_data <- subset(dotdata_relevant, id != j & features.plot %in% possible_genes)
+sub_data2 <- subset(sub_data, pct.exp > back)
+not_marker_genes <- sub_data2$features.plot
+
+for (mymark in as.character(subset(one_clust, features.plot %!in% not_marker_genes)$features.plot)) {
+  temp = list(genes=mymark, Identity=j, Pct.exp_clus=val, Pct.exp_back=back)
+  other_markers <- rbind(other_markers, temp)
+  }
+
+}
+}
+}
+
+
+write.csv(other_markers, "~/Dropbox (University of Oregon)/Hope_Dissertation_Folder/SingleCell/Ssc_single_cell/211210_Experiment/230122_CellRanger_EM2-pouchEMB-sscMT/230502_pipefish_marker_genes_restricted.csv")
+```
+
+
+### Examining marker genes from the literature
+
+```{r, fig.width=6, fig.height=8}
+
+##Endothelial
+endo_markers <- c("bcl6b", "plvapa", "mrc1a", "egfl7", "she", "gpr182")
+DotPlot(pipefish.integrated, features = c("LOC125991372", "LOC125966923", "LOC125986237", "LOC125979311", "LOC125975398", "LOC125988208"), assay="RNA") + ggtitle("Endothelial Markers")  + xlab("") + ylab("") + scale_x_discrete(labels=endo_markers) + 
+    theme(text = element_text(size=20),
+        axis.text.x = element_text(angle=90, hjust=1, size=20),
+        axis.text.y = element_text(size=20)) 
+
+## Liver and intestine markers
+liv_marks <- c("tfa", "upp2", "aoc1", "fabp10a", "cldn15la", "grhprb")
+DotPlot(pipefish.integrated, features = c("LOC125985465", "LOC125973575", "LOC125986151", "LOC125975263", "LOC125985377", "LOC125988945"), assay="RNA") + ggtitle("Liver and Intestine Markers") + xlab("") + ylab("") + scale_x_discrete(labels=liv_marks) + 
+    theme(text = element_text(size=20),
+        axis.text.x = element_text(angle=90, hjust=1, size=20),
+        axis.text.y = element_text(size=20))
+
+## Fin markers
+fin_marks <- c("hoxa13b", "hoxa13a", "msx1a", "emilin2b", "dpep1")
+DotPlot(pipefish.integrated, features = c("LOC125975201", "LOC125987107", "LOC125977010", "LOC125986132", "LOC125967684"), assay="RNA") + ggtitle("Fin Markers") + xlab("") + ylab("") + scale_x_discrete(labels=fin_marks) + 
+    theme(text = element_text(size=20),
+        axis.text.x = element_text(angle=90, hjust=1, size=20),
+        axis.text.y = element_text(size=20)) 
+
+## vascular smooth muscle markers
+sm_markers <- c("mylkb","act2", "cald1a", "fn1b", "cald1b")
+DotPlot(pipefish.integrated, features = c("LOC125973810","LOC125991709", "LOC125992100", "LOC125966868", "LOC125970853"), assay="RNA") + ggtitle("Vascular smooth muscle Markers") + xlab("") + ylab("") + scale_x_discrete(labels=sm_markers) + 
+    theme(text = element_text(size=20),
+        axis.text.x = element_text(angle=90, hjust=1, size=20),
+        axis.text.y = element_text(size=20)) 
+
+## Neutrophil markers
+neutro_markers <- c("mpx", "coro1a", "ncf1")
+DotPlot(pipefish.integrated, features=c("LOC125980048", "LOC125984042", "LOC125982350")) + ggtitle("Neutrophil markers") + xlab("") + ylab("") + scale_x_discrete(labels=neutro_markers) + 
+    theme(text = element_text(size=20),
+        axis.text.x = element_text(angle=90, hjust=1, size=20),
+        axis.text.y = element_text(size=20)) 
+
+## Cardiac Muscle 
+cardiac_markers <- c("lft2", "cx36.7", "nppa", "slc8a1a", "adprhl1", "ryr2b", "tnnc1a", "myh6", "myh7l", "lrrc10", "nkx2.5")
+DotPlot(pipefish.integrated, features=c("LOC125990250", "LOC125980630", "LOC125988240", "LOC125978980", "LOC125966791", "LOC125978735", "LOC125988867", "LOC125990476", "LOC125985090", "LOC125971257", "LOC125984993")) + ggtitle("Cardiac muscle markers") + xlab("") + ylab("") + scale_x_discrete(labels=cardiac_markers) + 
+    theme(text = element_text(size=20),
+        axis.text.x = element_text(angle=90, hjust=1, size=20),
+        axis.text.y = element_text(size=20)) 
+
+#cranial neural crest
+genes_cnc <- c("dlx4a", "dlx4b", "dlx1a", "bmp2b", "dlx6a", "dlx3b", "dlx5a", "dlx2a", "hoxa2", "hoxa3a", "nkx3-2", "shh", "fgf8b")
+DotPlot(pipefish.integrated, features = c("LOC125983076", "LOC125991481", "LOC125973409", "LOC125990545", "LOC125986947", "LOC125991480", "LOC125986946", "LOC125973412", "LOC125975118", "LOC125987101", "LOC125978864", "LOC125985830", "LOC125969315"), dot.min=.01, cols = c("hotpink", "hotpink4")) + ggtitle("CNC markers") + scale_x_discrete(labels=genes_cnc) +  theme(text = element_text(size=20),
+        axis.text.x = element_text(angle=90, hjust=1, size=20),
+        axis.text.y = element_text(size=20)) 
+```
+
+## Examining markers from Fabian et al. 2022
+
+```{r, fig.width=10}
+
+DotPlot(pipefish.integrated, features=c("LOC125970285", "LOC125972051", "LOC125977353")) + ggtitle("Crump perichondrium markers")
+DotPlot(pipefish.integrated, features=c("LOC125972722", "LOC125976707", "LOC125967271")) + ggtitle("Crump periosteum markers")
+DotPlot(pipefish.integrated, features=c("LOC125992297", "LOC125994347")) + ggtitle("crump dermal fibroblast markers")
+DotPlot(pipefish.integrated, features=c("LOC125970713", "LOC125967050","LOC125977010", "LOC125976165")) + ggtitle("crump mesenchymal markers")
+DotPlot(pipefish.integrated, features=c("LOC125969257")) + ggtitle("crump stroma markers")
+DotPlot(pipefish.integrated, features=c("LOC125968634", "LOC125970800", "LOC125972722", "LOC125982287")) + ggtitle("crump teeth markers")
+
+DotPlot(pipefish.integrated, features=c("LOC125988564", "LOC125994403", "LOC125970063","LOC125970323")) + ggtitle("crump hyaline cartilage markers")
+DotPlot(pipefish.integrated, features=c("LOC125992210", "LOC125969257", "LOC125994188", "LOC125974646")) + ggtitle("crump gill markers")
+
+##others
+mixed_markers <- c("zwi", "neurod1", "neurod2","neurod6b", "neurod4","stmn1a", "atoh1a", "mitfa", "tfec", "xdh", "hbbe2", "epcam")
+DotPlot(pipefish.integrated, features=c("LOC125983732", "LOC125973828", "LOC125983503","LOC125985542", "LOC125989044","LOC125986663", "LOC125994582", "LOC125989302", "LOC125992125", "LOC125988038", "LOC125991132", "LOC125978439")) + ggtitle("Mixed markers") + xlab("") + ylab("") + scale_x_discrete(labels=mixed_markers) + 
+    theme(text = element_text(size=20),
+        axis.text.x = element_text(angle=90, hjust=1, size=20),
+        axis.text.y = element_text(size=20)) 
+```
+
+### Examining marker genes identified by Seurat in our analysis
+
+```{r, fig.width=12}
+clust <- 38:0
+
+for (i in clust) {
+  print(DotPlot(pipefish.integrated, features = subset(markers, cluster==as.character(i))$gene, dot.min=.01, cols = c("hotpink", "hotpink4")) + ggtitle(as.character(i)) + scale_x_discrete(labels=subset(markers, cluster==as.character(i))$gene_name) +  theme(text = element_text(size=20),
+        axis.text.x = element_text(angle=90, hjust=1, size=20),
+        axis.text.y = element_text(size=20)))
+}
+
+```
+
+
+```{r, fig.height=6, fig.width=7}
+gene_names <- c("scpp1", "col10a1a", "crispld1a", "sp7", "phospho1", "ano5a", "panx3", "loxl4", "bgnb", "spp1", "dkk1a", "entpd5a", "cd8a", "ifitm5", "satb2", "qpct", "tmem119a", "col5a2a", "enam")
+
+bone_marks_ouratlas <- DotPlot(pipefish.integrated, features=c("LOC125968427", "LOC125980991", "LOC125985968", "LOC125977885", "LOC125983707", "LOC125970090", "LOC125982599", "LOC125969514", "LOC125988927", "LOC125980178", "LOC125978374", "LOC125980692", "LOC125970145", "LOC125970385", "LOC125974112", "LOC125980599", "LOC125993872", "LOC125988248", "LOC125969344"), cols = c("hotpink", "hotpink4"), assay="RNA") + xlab("")  +
+    theme(text = element_text(size=20),
+        axis.text.x = element_text(angle=90, hjust=1, size=20),
+        axis.text.y = element_text(size=15)) + scale_x_discrete(labels=gene_names)
+
+png("230502_EM1_EM2_UMAP_bonemarkers.png", width=4000, height=3500, res=300)
+bone_marks_ouratlas
+dev.off()
+```
+
+
+## Preparing the UMAP
+
+```{r}
+
+levels(pipefish.integrated@meta.data$seurat_clusters)
+
+mycolors <- c("1"="red", "19"="tomato4", "32"="tomato1", "30"="lightyellow2", "21"="lightyellow3", "2"="springgreen4", "17"="springgreen", "37"="olivedrab", "10"="palegreen1", "20"="orange", "34"="yellow1", "14"="indianred2", "36"="palegreen4", "23"="lightsalmon", "18"="violetred3", "4"="thistle2", "27"="maroon2", "5"="plum2", "28"="magenta3", "6"="orchid2", "9"="mediumpurple4","16"="chocolate4", "15"="mediumpurple2", "29"="purple3", "24"="magenta4", "31"="gray2", "8"="paleturquoise2", "3"="cadetblue3", "25"="midnightblue", "0"="cadetblue4", "7"="skyblue3", "13"="pink3", "12"="steelblue4", "22"="slateblue4", "33"="royalblue2", "26"="mistyrose", "35"="navy", "11"= "grey")
+
+my_cols2 <- mycolors[order(as.integer(names(mycolors)))]
+scales::show_col(my_cols2)
+
+DimPlot(pipefish.integrated,
+        cols = my_cols2, label=TRUE, repel=TRUE)
+
+pdf("subsets/230818_EM1_EM2_UMAP_nolabels.pdf")
+DimPlot(pipefish.integrated,
+        cols = my_cols2, label=FALSE, repel=TRUE)
+dev.off()
+
+pdf("UMAPs/230818_EM1_EM2_UMAP_labels.pdf")
+DimPlot(pipefish.integrated,
+       cols = my_cols2, label=TRUE, repel=TRUE)
+dev.off()
+```
+
+## Determining numbers of cells in the broad tissue types
+
+```{r}
+
+### getting cell cluster overall counts
+
+##muscle: 2,10,17,36,37
+muscle_cell_numbers <- pipefish.integrated.cell_counts[3] + pipefish.integrated.cell_counts[11] + pipefish.integrated.cell_counts[18] + pipefish.integrated.cell_counts[37] + pipefish.integrated.cell_counts[38]
+muscle_cell_numbers
+
+##nervous: 0,3,7,8,12,25,31,33,35,22
+nervous_cell_numbers <- pipefish.integrated.cell_counts[1] + pipefish.integrated.cell_counts[4] + pipefish.integrated.cell_counts[8] + pipefish.integrated.cell_counts[13] + pipefish.integrated.cell_counts[26] + pipefish.integrated.cell_counts[32] + pipefish.integrated.cell_counts[34] + pipefish.integrated.cell_counts[36] + pipefish.integrated.cell_counts[23]
+nervous_cell_numbers
+
+##connective (non-blood, pigment, digestive or immune)
+connective_cell_numbers <- pipefish.integrated.cell_counts[5] + pipefish.integrated.cell_counts[6] + pipefish.integrated.cell_counts[7] + pipefish.integrated.cell_counts[10] + pipefish.integrated.cell_counts[14] + pipefish.integrated.cell_counts[15] + pipefish.integrated.cell_counts[16] + pipefish.integrated.cell_counts[17] + pipefish.integrated.cell_counts[19] + pipefish.integrated.cell_counts[25] + pipefish.integrated.cell_counts[27] + pipefish.integrated.cell_counts[28] + pipefish.integrated.cell_counts[29] + pipefish.integrated.cell_counts[30]
+connective_cell_numbers
+
+##undifferentiated mesenchyme
+mesenchyme_cell_numbers <- pipefish.integrated.cell_counts[5] + pipefish.integrated.cell_counts[6] + pipefish.integrated.cell_counts[25] + pipefish.integrated.cell_counts[30]
+mesenchyme_cell_numbers
+
+##blood: 1, 19, 32
+blood_cell_numbers <- pipefish.integrated.cell_counts[2] + pipefish.integrated.cell_counts[20] + pipefish.integrated.cell_counts[33]
+blood_cell_numbers
+
+##immune: 21, 30
+immune_cell_numbers <- pipefish.integrated.cell_counts[22] + pipefish.integrated.cell_counts[31]
+immune_cell_numbers
+
+##epidermal cells: 23
+pipefish.integrated.cell_counts[24]
+
+##pigment cells: 20
+pipefish.integrated.cell_counts[21]
+
+##digestive 34
+pipefish.integrated.cell_counts[35]
+
+```
+
+## Dot Plot Marker Gene Plot
+
+```{r}
+levels(pipefish.integrated) <- c('0','3','7','8','12','22','25','31','33','35','1','19','32','2','10','17','36','37','4','5','6','9','13','14','15','16','18','24','26','27','28','29','20','21','30','23','34','11')
+
+gene_ids <- c("LOC125966877", "LOC125972180", "LOC125967921", "LOC125980375", "LOC125990933", "LOC125988105", "LOC125994272", "LOC125981234", "LOC125970291","LOC125982748","LOC125989376","LOC125983660", "LOC125968392", "LOC125983792",
+              "LOC125992480", "LOC125989146", "LOC125981335", "LOC125970863","LOC125986592", "LOC125988378", "LOC125982266", "LOC125989137", "LOC125994347", "LOC125977639", "LOC125990291", "LOC125974909", "LOC125970385",
+              "LOC125969012", "G19036", "LOC125984679", "LOC125994128", "LOC125968723", "LOC125980016", "LOC125993707", "zgc:195282", "LOC125990460", "LOC125975263")
+          
+gene_names <- c("shank2b","scg2a","fndc9","insm1b","pax10","erbb3b","LOC125994272","pacre1","hyal1","pou4f3","alas2", "slc4a1a", "klf1", "myosin,skeletal muscle-like","myf5","tnni1a","adss1","tnni1","angpt1","prdm16","elnb","tnmd","hpdb","csrp1b","matn3a","trip13","ifitm5","adgrd2","tmem161b","ddr2","loxl6","prss12","mlana","cmklr1","zgc:195282","plaat4","fabp10a")
+
+clus_colors <- c("cadetblue4","cadetblue3","skyblue3","paleturquoise2","steelblue4","slateblue4","midnightblue","gray2","royalblue2","navy","red", "tomato4", "tomato1","springgreen4","palegreen1","springgreen","palegreen4","olivedrab","thistle2","plum2", "orchid2", "mediumpurple4","pink3","indianred2","mediumpurple2","chocolate4","violetred3","magenta4","mistyrose","maroon2","magenta3","purple3","orange","lightyellow3","lightyellow2","lightsalmon","yellow1")
+
+info_for_geomtile <- data.frame(gene_ids, gene_names, clus_colors)
+colnames(info_for_geomtile) <- c("gene_id", "gene_name", "cluster_color")
+
+
+
+info_for_geomtile2 <- data.frame(c(0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37), c("cadetblue4","cadetblue3","skyblue3","paleturquoise2","steelblue4","slateblue4","midnightblue","gray2","royalblue2","navy","red", "tomato4", "tomato1","springgreen4","palegreen1","springgreen","palegreen4","olivedrab","thistle2","plum2", "orchid2", "mediumpurple4","pink3","indianred2","mediumpurple2","chocolate4","violetred3","magenta4","mistyrose","maroon2","magenta3","purple3","orange","lightyellow3","lightyellow2","lightsalmon","yellow1", "grey"))
+colnames(info_for_geomtile2) <- c("cluster_number", "cluster_color2")
+
+pdf("MarkerGene_dotplots/230927_marker_gene_dotplot_orgaizedbyCelltype.pdf", width=20, height=15)
+DotPlot(pipefish.integrated, features = gene_ids, cols = c("hotpink", "hotpink4"), assay="RNA", dot.min=.05) + xlab("") + scale_x_discrete(labels=gene_names) + 
+    theme(text = element_text(size=20),
+        axis.text.x = element_text(angle=90, hjust=1, size=20),
+        axis.text.y = element_text(size=20)) + geom_tile(data = info_for_geomtile, aes(x = gene_id, y = -.1, fill = cluster_color)) + geom_tile(data = info_for_geomtile2, aes(x = 0, y = cluster_number +1, fill = cluster_color2)) + 
+  scale_fill_identity()
+dev.off()
+```
+
+
+## Tooth Primordia Analysis
+
+```{r, echo=FALSE, error=FALSE, message=FALSE, warning=FALSE, results='hide', fig.keep='all', fig.height=6, fig.width=6}
+DefaultAssay(pipefish.integrated) <- "RNA"
+toothgene_names <- c("pitx2", "fgf8b", "fgf22", "dlx2a", "dlx3b", "lhx6", "lhx6b", "aldh1a2", "bmp4", "bmp2b",'edar',"shha", "pax9", "msx1a", "msx2b", "lef1", "wnt10a", "cdkn1a")
+DotPlot(pipefish.integrated, features=c("LOC125987188","LOC125969315", "LOC125965806","LOC125973412", "LOC125991480", "LOC125980100", "LOC125994683", "LOC125967679", 'LOC125990545', 'LOC125980814','LOC125973306','LOC125985830', 'LOC125981181', "LOC125977010", "LOC125969333", "LOC125969039", "LOC125973461", "LOC125977288"), dot.min = .01, cols = c("hotpink", "hotpink4"), assay="RNA") +
+    theme(text = element_text(size=20),
+        axis.text.x = element_text(angle=90, hjust=1, size=20),
+        axis.text.y = element_text(size=15)) + scale_x_discrete(labels= toothgene_names) + xlab("")
+
+
+### Ancient tooth genes (from fraser et al 2009 PLOS)
+Ancient_tooth_names <- c('barx1', 'hoxa2b', 'hoxb2a', 'hoxb5b',  'hoxc6a', 'hoxd4a', 'lhx6', 'lhx7', 'fgf8b')
+Ancient_tooth_ids <- c('LOC125972627', 'LOC125975118', 'LOC125983632', 'LOC125990970', 'LOC125989339', 'LOC125973418', 'LOC125980100', 'LOC125994683', 'LOC125969315')
+
+DotPlot(pipefish.integrated, features=Ancient_tooth_ids, dot.min = .05, cols = c("hotpink", "hotpink4"), assay="RNA") +
+    theme(text = element_text(size=20),
+        axis.text.x = element_text(angle=90, hjust=1, size=20),
+        axis.text.y = element_text(size=15)) + scale_x_discrete(labels= Ancient_tooth_names) + xlab("") + ggtitle("Ancient Dental Network")
+
+### Core tooth genes (from fraser et al 2009 PLOS)
+Core_tooth_names <- c('b-catenin', 'bmp2', 'bmp4', 'dlx2a', 'eda', 'edar', 'fgf10a', 'notch2', 'pitx2', 'runx2a', 'shh', 'fgf8b')
+Core_tooth_ids <- c('LOC125974642', 'LOC125990545', 'LOC125980814', 'LOC125973412', 'LOC125977105', 'LOC125973306', 'LOC125980131', 'LOC125970314', 'LOC125987188', 'LOC125978126', 'LOC125985830', 'LOC125969315')
+
+
+DotPlot(pipefish.integrated, features=Core_tooth_ids, dot.min = .05, cols = c("hotpink", "hotpink4"), assay="RNA") +
+    theme(text = element_text(size=20),
+        axis.text.x = element_text(angle=90, hjust=1, size=20),
+        axis.text.y = element_text(size=15)) + scale_x_discrete(labels= Core_tooth_names) + xlab("") + ggtitle("Core Dental Network")
+
+### Markers from Tucker and Sharpe 2004 (Mouse)
+toothgene_names <- c("fgf8a", "bmp4", "shha", "isl1", "pitx2", "wnt10b","follistatin", "lef1", "eda", "edar", 
+                     "activinBA", "pax9", "barx1", "msx1a", "msx2", "dlx1a", "dlx2a", "dlx3b", "dlx5a", "dlx6a","ptc", "gli1", "gli2", "gli3", "lhx6", "lhx7", "runx2a", "fgf10a","p21", "edaradd", "bmp2", "bmp7", "wnt10a")
+
+toothncbi_ids <- c("LOC125978290", "LOC125980814", "LOC125985830", "LOC125993650", "LOC125987188", "LOC125988857",
+                   "LOC125994142", "LOC125969039", "LOC125977105", "LOC125973306", "LOC125989449", "LOC125981181"
+                   , "LOC125977467", "LOC125977010", "LOC125969333", "LOC125973409", "LOC125973412", "LOC125991480",
+                   "LOC125986946", "LOC125986947", "LOC125994286", "LOC125976920", "LOC125988481","LOC125985637","LOC125980100", "LOC125970800", "LOC125978126", "LOC125980131", "LOC125977288", "LOC125978497", "LOC125993975", "LOC125987790", "LOC125973461")
+
+Tooth_dot <- DotPlot(pipefish.integrated, features=toothncbi_ids, dot.min = .01, cols = c("hotpink", "hotpink4"), assay="RNA") +
+    theme(text = element_text(size=20, face="bold"),
+        axis.text.x = element_text(angle=90, hjust=1, size=20, vjust=.5, face="bold.italic"),
+        axis.text.y = element_text(size=15, face="bold")) + scale_x_discrete(labels= toothgene_names) + xlab("")
+
+Tooth_dot
+
+
+##### Selected genes
+toothgene_names <- c("pitx2", "dlx2a", "dlx3b", "lhx6", "lhx8", "aldh1a2", "lef1", "wnt10a", "scpp1", "spp1", "enam", "col10a1a", "sp7")
+DotPlot(pipefish.integrated, features=c("LOC125987188", "LOC125973412", "LOC125991480", "LOC125980100", "LOC125970800", "LOC125967679", "LOC125969039", "LOC125973461", "LOC125968427", "LOC125980178", "LOC125969344", "LOC125980991", "LOC125977885"), dot.min = .01, cols = c("hotpink", "hotpink4"), assay="RNA") +
+    theme(text = element_text(size=20),
+        axis.text.x = element_text(angle=90, hjust=1, size=20),
+        axis.text.y = element_text(size=15)) + scale_x_discrete(labels= toothgene_names) + xlab("")
+
+
+toothgene_names <- c("pitx2", "shha", "eda", "bmp4", "dlx2a", "dlx3b", "lhx6a",  "lhx8", "aldh1a2", "lef1", "wnt10a", "msx1a", "msx2","scpp1", "spp1", "enam", "sparc", "col1a1b", "col4a1", "col5a1", "mmp20")
+Tooth_dot_subclust <- DotPlot(pipefish.integrated, features=c("LOC125987188", "LOC125985830", "LOC125977105", "LOC125980814", "LOC125973412", "LOC125991480", "LOC125980100","LOC125970800", "LOC125967679", "LOC125969039", "LOC125973461", "LOC125977010","LOC125982750","LOC125968427", "LOC125980178", "LOC125969344", "LOC125987714", "LOC125991452", "LOC125974020", "LOC125979261",  "LOC125971944"), dot.min = .01, cols = c("hotpink", "hotpink4"), assay="RNA") +
+    theme(text = element_text(size=20, face="bold"),
+        axis.text.x = element_text(angle=90, hjust=1, size=20, vjust=.5, face="bold.italic"),
+        axis.text.y = element_text(size=15, face="bold")) + scale_x_discrete(labels= toothgene_names) + xlab("")
+
+tooth_dot_data <- Tooth_dot_subclust$data
+
+Tooth_dot
+
+pdf("230623_tooth_markers.pdf", width=12, height=10)
+Tooth_dot
+dev.off()
+
+```
+
+## Gene Network Analysis (WGCNA)
+
+We completed a WGCNA analysis next to identify gene modules that may be unique to a cluster or shared between multiple clusters. The perk of this approach over the FindAllMarkers analysis approach is that it allows for common signatures to be identified (for example, if multiple cell types are neuronal then they may have genes in common). We need to use the integrated assay for this analysis since it is the only assay with variable features.
+
+
+```{r}
+library(WGCNA)
+
+options(stringsAsFactors = F)
+
+pipefish.integrated <- readRDS("230503_pipefish_EM1_EM2_integrated_soup_doub.rds")
+DefaultAssay(pipefish.integrated) <- "RNA"
+
+datExpr <- t(as.matrix(GetAssayData(pipefish.integrated)))[,VariableFeatures(pipefish.integrated, assay="integrated")]  # only use variable genes in analysis
+
+### Saving and Re-calling files to use in the future
+saveRDS(datExpr, "WGCNA_analysis/230808_WGCNA_datExpr.rds")
+datExpr <- readRDS("WGCNA_analysis/230808_WGCNA_datExpr.rds")
+```
+
+We used a beta value of two since it seems to level off at 2 on the adjacency matrix plot.
+
+```{r}
+library(WGCNA)
+options(stringsAsFactors = F)
+pipefish_adjmatrix <- abs(bicor(datExpr,  maxPOutliers = 0.05, robustY = FALSE))
+
+##saving and recalling files to use in the future
+saveRDS(pipefish_adjmatrix, "WGCNA_analysis/230808_WGCNA_adjancy_matrix.rds")
+pipefish_adjmatrix <- readRDS("WGCNA_analysis/230808_WGCNA_adjancy_matrix.rds")
+
+ #chosing a beta value where it starts to flatten out
+powers = c(c(1:10), seq(from = 12, to=20, by=2))
+sft = pickSoftThreshold(datExpr, powerVector = powers, verbose = 5)
+plot(sft$fitIndices[,1], -sign(sft$fitIndices[,3])*sft$fitIndices[,2],
+     xlab='Soft Threshold (power)',ylab='Scale Free Topology Model Fit,signed R^2',
+     type='n', main = paste('Scale independence'), ylim = c(-.5, 1));
+text(sft$fitIndices[,1], -sign(sft$fitIndices[,3])*sft$fitIndices[,2],
+     labels=powers,cex=1,col='red'); abline(h=0.90,col='red')
+
+beta <- 2
+a = pipefish_adjmatrix^beta
+#disslimarity measure
+w <- 1 -TOMsimilarity(a)
+```
+
+We then created co-expression modules and merged any modules that had a correlation of 75% (which in this case, was no modules!).
+
+```{r}
+#co expression module time!
+#gene tree
+gene_tree <- hclust(as.dist(w), method='average')
+#creating modules 
+modules <- cutreeDynamic(dendro = gene_tree, distM = w, deepSplit = 2, pamRespectsDendro = FALSE,
+              minClusterSize = 15) #change min cluster size 
+table(modules)
+#assign module colours
+module.colours = labels2colors(modules)
+
+#plot the dendrogram and corresponding colour bars underneath
+plotDendroAndColors(gene_tree, module.colours, 'Module colours', dendroLabels = FALSE, hang = 0.03,
+                    addGuide = TRUE, guideHang = 0.05, main='')
+
+
+library(ape)
+#calculate eigengenes
+MEs = moduleEigengenes(datExpr, colors = module.colours, excludeGrey = FALSE)$eigengenes
+
+#calculate dissimilarity of module eigengenes
+MEDiss = 1-cor(MEs);
+
+#cluster module eigengenes
+METree = hclust(as.dist(MEDiss), method = 'average');
+
+#plot the result with phytools package
+par(mar=c(2,2,2,2))
+plot.phylo(as.phylo(METree),type = 'fan',show.tip.label = FALSE, main='')
+tiplabels(frame = 'circle',col='black', text=rep('',length(unique(modules))), bg = levels(as.factor(module.colours)))
+
+#viewing the eigenvalues for the modules
+MM = abs(bicor(datExpr, MEs))
+
+sizeGrWindow(7,6)
+plot(METree, main = "clustering of module eigengenes", xlab ="", sub="")
+
+#merged at a correlation of .65% 
+MEDissThres <- .35
+#plotting my cut line to show where modules will be combined
+abline(h=MEDissThres, col="magenta")
+
+###
+
+###
+
+#calling automatic merge function
+my_merge <- mergeCloseModules(datExpr,module.colours,cutHeight = MEDissThres, verbose=3)
+#merged module colors
+merged_colors <- my_merge$colors
+#new eigengenes
+mergedMEs <- my_merge$newMEs
+#let's see how things have changed to see if this was a good idea
+sizeGrWindow(12,9)
+plotDendroAndColors(gene_tree, cbind(module.colours, merged_colors), c("Dynamic tree cut", "Merged dynamic"), dendroLabels = FALSE, addGuide = TRUE, hang=.03, guideHang = .05)
+
+saveRDS(merged_colors, "WGCNA_analysis/230808_WGCNA_mergedcolors.rds")
+merged_colors <- readRDS("WGCNA_analysis/230808_WGCNA_mergedcolors.rds")
+####so merging does nothing because they are all disimilar enough right now
+```
+
+We plotted a gene heatmap using TOM similarity with a power of two.
+
+```{r}
+#plotting a gene heatmap
+#calculating the topological overlap
+dissTOM <- 1-TOMsimilarityFromExpr(datExpr, power=2)
+#transforming it
+plotTOM <- dissTOM^7
+#setting diag to NA
+diag(plotTOM) <- NA
+# Call the plot function
+sizeGrWindow(9,9)
+library(gplots)
+#plotting dissimilarity - the highly correlated spots are the red spots in the middle 
+TOMplot(plotTOM, gene_tree, module.colours, main = "Network heatmap plot, all genes", col=colorpanel(250,'red',"orange",'lemonchiffon'))
+```
+
+We then examined by module how it correlated with each cell type. From this approach, we can see how cell types with a similar label (ex: muscle clusters) have gene expression modules in common. We converted the color names to numbers later in our analysis, the conversion table is in a supplemental file.
+
+```{r}
+f <- function(module){
+  #print(module)
+  #eigengene <- moduleEigengenes(datExpr, colors = module.colours, excludeGrey = FALSE)$eigengenes
+  eigengene <- unlist(mergedMEs[paste0("ME", "yellowgreen")])
+  #eigen <- unlist(MEs[paste0("ME", modules)])
+  #eigenen <- unlist(eigengene[paste0("ME", modules)])
+  #length(eigen)
+  #length(eigenen)
+ # length(MEs)
+ # length(eigengene)
+ # length(Idents(stickleback))
+  means <- tapply(eigengene, Idents(pipefish.integrated), mean, na.rm = T)
+  return(means)
+}
+
+
+### plotting all of the modules on 1 graph
+mynewcolors <- unique(merged_colors)
+plotdat <- sapply(mynewcolors, f)
+saveRDS(plotdat, "WGCNA_analysis/230808_plot_dat.RDS")
+plotdat <- readRDS("WGCNA_analysis/230808_plot_dat.RDS")
+write.csv(plotdat, "WGCNA_analysis/230808_module_eigengene_correlations.csv")
+
+matplot(plotdat, col = mynewcolors, type = "l", lwd = 2, xaxt = "n",
+        ylab = "WGCNA Module Eigengene")
+axis(1, at = 1:38, labels = rownames(plotdat), cex.axis = 0.8, las=2)
+matpoints(plotdat, col = mynewcolors, pch = 21)
+
+
+
+### Plotting the modules on different figures
+colors_wgcna <- colnames(plotdatframe)
+length(colors_wgcna)
+for (i in 1:length(plotdatframe)) {
+  mychart <- plot(plotdatframe[,i], col = colors_wgcna[i], type = "l", lwd = 2, xaxt = "n",
+        ylab = "WGCNA Module Eigengene", main=colors_wgcna[i])
+  mychart <- axis(1, at = 1:38, labels = rownames(plotdat), cex.axis = 0.8, las=2)
+  mychart
+  
+  
+}
+```
+
+
+## To make the data interpretable, we pulled back in the gene names from NCBI
+
+```{r}
+species_gff <- read.csv("/Users/hopehealey/Dropbox (University of Oregon)/Resources/Genomes_and_RNAseq_files/2022_Ssc_genome/2022_NCBI_assemb/NCBI_gene_table.csv")
+gene_names <- read.csv("/Users/hopehealey/Dropbox (University of Oregon)/Resources/Genomes_and_RNAseq_files/2022_Ssc_genome/2022_NCBI_assemb/230313_GCF_024217435.1_RoL_Ssco_1.1_Gene_Name_ID_conversion.csv")
+colnames(gene_names) <- c("gene", "gene_name")
+
+for (i in mynewcolors) {
+  genes <- data.frame(colnames(datExpr)[merged_colors == i])
+  colnames(genes) <- "gene"
+  module_genes <- merge(genes, gene_names, by = "gene", all.x=TRUE, sort=FALSE)
+  print(i)
+  print(module_genes$gene_name)
+}
+```
+
+## Outputting the modules
+
+Exporting a csv with all of the gene names for each module
+
+```{r}
+
+mywgcnaresults <- data.frame(matrix(ncol = 2, nrow = 0))
+#provide column names
+colnames(mywgcnaresults) <- c("color","gene")
+for (i in mynewcolors) {
+  genes <- colnames(datExpr)[merged_colors == i]
+  for (j in genes) {
+    result_frame <- c(i, j)
+  mywgcnaresults[nrow(mywgcnaresults) + 1, ] <- result_frame 
+  }
+}
+
+mywgcnaresults <- merge(mywgcnaresults, gene_names, by = "gene", all.x=TRUE, sort=FALSE)
+
+
+write.csv(mywgcnaresults, "230807_WGCNA_genes_in_networks.csv")
+```
+
+### DotPlots of the modules
+
+We created Dotplots for every module so we could observed the gene expression patterns for each module gene. 
+
+```{r, fig.height=8}
+library(Seurat)
+library(ggplot2)
+
+for (i in mynewcolors) {
+genes <- data.frame(colnames(datExpr)[merged_colors == i])
+colnames(genes) <- "gene"
+module_genes <- merge(genes, gene_names, by = "gene", sort=FALSE)
+mydot <- DotPlot(pipefish.integrated, features=module_genes$gene, dot.min = .01, cols = c("hotpink", "hotpink4"), assay="RNA") + ggtitle(i)  + xlab("") + ylab("") + scale_x_discrete(labels=module_genes$gene_name) + 
+    theme(text = element_text(size=20),
+        axis.text.x = element_text(angle=90, hjust=1, size=20),
+        axis.text.y = element_text(size=20)) 
+print(mydot)
+}
+```
+
+
+### KEGG analysis of the modules
+
+To analyze the components of the module, we ran a KEGG analysis. With KEGG, we can see if there are any key pathways that correspond with certain modules. The issue is that WGCNA does not assign p-values to genes in each pathway, so we could not complete an enrichment test. However, we can at least get the number of genes that are a member of the pathway.
+
+```{r, fig.height=8}
+library(KEGGREST)
+pathways.list <- keggList("pathway", "sscv")
+head(pathways.list)
+
+# Pulling all genes for each pathway
+pathway.codes <- sub("path:", "", names(pathways.list)) 
+
+pathway_breakdown <- function(pathway_name) {
+  pw <- keggGet(pathway_name)
+        if (is.null(pw[[1]]$GENE)) return(NA)
+        pw2 <- pw[[1]]$GENE[c(TRUE,FALSE)] 
+        pw2 <- unlist(lapply(strsplit(pw2, split = ";", fixed = T), function(x)x[1]))
+        return(pw2)
+}
+genes.by.pathway <- sapply(pathway.codes, pathway_breakdown)
+
+enrich_test_pathway <- function(pathway) {
+        pathway.genes <- genes.by.pathway[[pathway]]
+        list.genes.in.pathway <- intersect(names(geneList), pathway.genes)
+        list.genes.not.in.pathway <- setdiff(names(geneList), list.genes.in.pathway)
+        scores.in.pathway <- geneList[list.genes.in.pathway]
+        scores.not.in.pathway <- geneList[list.genes.not.in.pathway]
+        if (length(scores.in.pathway) > 0){
+            p.value <- wilcox.test(scores.in.pathway, scores.not.in.pathway, alternative = "less")$p.value
+        } else{
+            p.value <- NA
+        }
+        return(c(p.value = p.value, Annotated = length(list.genes.in.pathway)))
+    }
+
+
+#create data frame with 0 rows and 5 columns
+kegg_df <- data.frame(matrix(ncol = 5, nrow = 0))
+#provide column names
+colnames(kegg_df) <- c("pathway.code","pathway.name",  "Annotated", "p.value","mymodule")
+
+for (i in mynewcolors) {
+  genes <- colnames(datExpr)[merged_colors == i]
+  genes <- genes[-grep("G", genes)] ## removing the G genes that are not in the KEGG database
+  geneList <- rep(1,each=length(genes))
+  names(geneList) <- gsub("LOC", "", genes)
+  pVals.by.pathway <- t(sapply(names(genes.by.pathway), enrich_test_pathway))
+  outdat <- data.frame(pathway.code = rownames(pVals.by.pathway))
+  outdat$pathway.name <- pathways.list[outdat$pathway.code]
+  outdat$p.value <- pVals.by.pathway[,"p.value"]
+  outdat$Annotated <- pVals.by.pathway[,"Annotated"]
+  outdat <- subset(outdat, Annotated>0)
+  outdat$mymodule <- i
+  
+  if (nrow(outdat) > 1) {
+  outdat$mymodule <- i
+  kegg_df <- rbind(kegg_df, outdat)
+}
+}
+
+
+#### Creating plots for each color
+
+kegg_df$pathway.name <- gsub("(Gulf pipefish)", "",  as.character(kegg_df$pathway.name))
+kegg_df$pathway.name <- gsub("Sygnathus", "",  as.character(kegg_df$pathway.name))
+kegg_df$pathway.name <- gsub("scovelli", "",  as.character(kegg_df$pathway.name))
+kegg_df$pathway.name <- gsub("Syngnathus", "",  as.character(kegg_df$pathway.name))
+kegg_df$pathway.name <- gsub("-", "",  as.character(kegg_df$pathway.name))
+kegg_df$pathway.name <- gsub("[()]", "",  as.character(kegg_df$pathway.name))
+
+## exporting the kegg data frame so I can make additional plots easier if I wanted to 
+write.csv(kegg_df,"WGCNA_analysis/KEGG_for_each_module/230809_WGCNA_kegg_module_results.csv")
+
+for (i in mynewcolors) {
+  color_sub <- subset(kegg_df, mymodule==i)
+  kegg_graph <- ggplot(color_sub,aes(pathway.name,Annotated)) + geom_bar(stat="identity", fill=i, color="black",size=2) + theme(axis.text.x = element_text(angle = 90, size = 25, hjust=1, vjust=.2),axis.text.y = element_text(angle = 90, size = 25, hjust=.6), axis.title.y = element_text(size=30, face="bold"), plot.title = element_text(size=35, face="bold", hjust=.5), panel.background = element_rect(fill="white"), axis.line = element_line(linewidth = 0.5, linetype = "solid",colour = "black")) +  xlab("") + ylab("Annotated Genes in Pathway") + ggtitle(i) 
+  print(kegg_graph)
+}
+
+
+
+```
+
+
+
+## Outputting the KEGG pathway results
+
+To look at these plots in an easier manner than R Markdown, we exported them to pdf files.
+
+```{r}
+for (i in mynewcolors) {
+  color_sub <- subset(kegg_df, mymodule==i)
+  
+  myfile_name <- paste("WGCNA_analysis/KEGG_for_each_module/230809_WGCNA_KEGG_for_modules_", i, ".pdf", sep="")
+  
+pdf(file = myfile_name,   # the file name
+    width = 20, # The width of the plot in inches
+    height = 20) # The height of the plot in inches
+  kegg_graph <- ggplot(color_sub,aes(pathway.name,Annotated)) + geom_bar(stat="identity", fill=i, color="black",size=2) + theme(axis.text.x = element_text(angle = 90, size = 25, hjust=1, vjust=.2),axis.text.y = element_text(angle = 90, size = 25, hjust=.6), axis.title.y = element_text(size=30, face="bold"), plot.title = element_text(size=35, face="bold", hjust=.5), panel.background = element_rect(fill="white"), axis.line = element_line(linewidth = 0.5, linetype = "solid",colour = "black")) +  xlab("") + ylab("Annotated Genes in Pathway") + ggtitle(i) 
+  print(kegg_graph)
+  dev.off()
+}
+
+```
