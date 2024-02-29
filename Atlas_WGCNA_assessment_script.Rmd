@@ -1,0 +1,582 @@
+---
+title: "240228_WGCNA_assessment"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Commands used to assess the WGCNA networks
+
+* Load in the dataset, the modules, and the WGCNA matrices.
+
+### Calculating t-statistic to get an "effect size" for the eigengene correspondance for a certain cluster!
+
+```{r, fig.height=10, fig.width=10}
+cluster_id <- as.data.frame(pipefish.integrated$seurat_clusters)
+cluster_id$cellid <- rownames(cluster_id)
+
+mergedMEs$cellid <- rownames(mergedMEs)
+
+mydata <- merge(mergedMEs, cluster_id, by="cellid")
+                
+# first testing with osteoblasts and the light yellow module
+## sample mean
+samp_mean <- mean(subset(mydata, `pipefish.integrated$seurat_clusters`=="18")$MElightyellow)
+## population mean
+pop_mean <- mean(mydata$MElightyellow)
+## sample size
+samp_size <- length(subset(mydata, `pipefish.integrated$seurat_clusters`=="18")$MElightyellow)
+## standard deviation of sample
+stdev_sample <- sd(subset(mydata, `pipefish.integrated$seurat_clusters`=="18")$MElightyellow)
+## t stat 
+my_t <- (samp_mean-pop_mean)/(stdev_sample/sqrt(samp_size))
+
+### now testing for every cluster in the light yellow module
+my_clusters <- seq(0,37, by=1)
+my_t_list <- c()
+
+for (j in my_clusters) {
+  ## sample mean
+  samp_mean <- mean(subset(mydata, `pipefish.integrated$seurat_clusters`==j)$MElightyellow)
+  ## population mean
+  pop_mean <- mean(mydata$MElightyellow)
+  ## sample size
+  samp_size <- length(subset(mydata, `pipefish.integrated$seurat_clusters`==j)$MElightyellow)
+  ## standard deviation of sample
+  stdev_sample <- sd(subset(mydata, `pipefish.integrated$seurat_clusters`==j)$MElightyellow)
+  ## t stat 
+  my_t <- (samp_mean-pop_mean)/(stdev_sample/sqrt(samp_size))
+
+  my_t_list[j+1] <- my_t
+}
+
+MElightyellow_ts <- data.frame(cluster_id = my_clusters, t_value = my_t_list)
+
+plot(MElightyellow_ts$cluster_id, MElightyellow_ts$t_value)
+
+### now testing for every module and every cluster
+my_clusters <- seq(0,37, by=1)
+my_modules <- seq(2,44, by=1)
+my_t_dataframe <- data.frame(matrix(nrow=38, ncol=43))
+colnames(my_t_dataframe) <- colnames(mydata[2:44])
+
+for (k in my_modules) {
+  module_name <- colnames(mydata[k])
+  my_t_list <- c()
+  
+  for (j in my_clusters) {
+  ## sample mean
+  samp_mean <- mean(subset(mydata, `pipefish.integrated$seurat_clusters`==j)[module_name][,1])
+  ## population mean
+  pop_mean <- mean(mydata[module_name][,1])
+  ## sample size
+  samp_size <- length(subset(mydata, `pipefish.integrated$seurat_clusters`==j)[module_name][,1])
+  ## standard deviation of sample
+  stdev_sample <- sd(subset(mydata, `pipefish.integrated$seurat_clusters`==j)[module_name][,1])
+  ## t stat 
+  my_t <- (samp_mean-pop_mean)/(stdev_sample/sqrt(samp_size))
+  print(my_t)
+  my_t_list[j+1] <- my_t
+}
+
+mymods_ts <- data.frame(cluster_id = my_clusters, t_value = my_t_list)
+
+plot(mymods_ts$cluster_id, mymods_ts$t_value, main=module_name)
+my_t_dataframe[module_name] <- my_t_list
+}
+
+## removing -inf values by setting them to the minimum values for that same module
+my_t_dataframe$MEgrey[37] <- min(my_t_dataframe$MEgrey[is.finite(my_t_dataframe$MEgrey)])
+my_t_dataframe$MEgrey[38] <- min(my_t_dataframe$MEgrey[is.finite(my_t_dataframe$MEgrey)])
+
+## plotting heatmap
+cluster_module_matrix <- t(as.matrix(my_t_dataframe))
+
+
+library(viridis)
+library(ComplexHeatmap)
+library(colorRamp2)
+
+viridis_map = circlize::colorRamp2(seq(-20, 
+                                       20, 
+                                       length.out = 1000),
+                                   viridis::viridis(1000))
+
+
+Heatmap(cluster_module_matrix, col = viridis_map,
+        name = "t-statistic", #title of legend
+        column_title = "Cell Clusters", row_title = "Gene Modules", row_dend_width = unit(50, "mm"), column_dend_height = unit(50,"mm"), column_names_gp = gpar(fontsize=16), row_title_gp = gpar(fontsize=20), column_title_gp = gpar(fontsize=20), rect_gp = gpar(col = "white", lwd = 2),
+        row_names_gp = gpar(fontsize = 14), # Text size for row names
+        row_dend_side = "right", column_dend_side = "bottom", clustering_distance_rows = "pearson", clustering_distance_columns = "pearson", heatmap_height = unit(.75,"cm")*nrow(cluster_module_matrix), heatmap_width = unit(.8,"cm")*ncol(cluster_module_matrix), row_dend_gp = gpar(lwd=2), column_dend_gp = gpar(lwd=2))
+
+## Modifying t heatmap for clarity
+my_t_dataframe_sub <- my_t_dataframe
+
+for (m in colnames(my_t_dataframe_sub)) {
+  print(m)
+  my_t_dataframe_sub[m][-8 < my_t_dataframe_sub[m] & my_t_dataframe_sub[m] < 8] <- NA
+}
+
+my_t_dataframe_sub <- t(my_t_dataframe_sub)
+colnames(my_t_dataframe_sub) <- seq(0,37,by=1)
+
+Heatmap(my_t_dataframe_sub, col = viridis_map, na_col="white", name = "t-statistic", #title of legend
+        column_title = "Cell Clusters", row_title = "Gene Modules", row_dend_width = unit(50, "mm"), column_dend_height = unit(50,"mm"), column_names_gp = gpar(fontsize=16), row_title_gp = gpar(fontsize=20), column_title_gp = gpar(fontsize=20), rect_gp = gpar(col = "white", lwd = 2),
+        row_names_gp = gpar(fontsize = 14), # Text size for row names
+         heatmap_height = unit(.75,"cm")*nrow(cluster_module_matrix), heatmap_width = unit(.8,"cm")*ncol(cluster_module_matrix), row_dend_gp = gpar(lwd=2), column_dend_gp = gpar(lwd=2))
+
+
+write.csv(my_t_dataframe, "WGCNA_analysis/240213_WGCNA_module_tvalues.csv")
+#############
+### Getting a p-value for those t-values using one way permutations
+
+npermut <- 1000
+my_nums <- seq(1, npermut, by=1)
+my_clusters <- seq(0,37, by=1)
+my_modules <- seq(2,44, by=1)
+my_p_dataframe <- data.frame(matrix(nrow=38, ncol=43))
+colnames(my_p_dataframe) <- colnames(mydata[2:44])
+
+for (k in my_modules) {
+  module_name <- colnames(mydata[k])
+  my_p_list <- c()
+  
+for (j in my_clusters) {
+  all_mod_permutations <- matrix(NA, nrow=npermut, ncol=1)
+  cluster_size <- length(subset(mydata, `pipefish.integrated$seurat_clusters`==j)[module_name][,1])
+  
+  ## cluster t-stat
+  ## sample mean
+  samp_mean <- mean(subset(mydata, `pipefish.integrated$seurat_clusters`==j)[module_name][,1])
+  ## population mean
+  pop_mean <- mean(mydata[module_name][,1])
+  ## sample size
+  samp_size <- length(subset(mydata, `pipefish.integrated$seurat_clusters`==j)[module_name][,1])
+  ## standard deviation of sample
+  stdev_sample <- sd(subset(mydata, `pipefish.integrated$seurat_clusters`==j)[module_name][,1])
+  ## t stat 
+  my_clus_t <- (samp_mean-pop_mean)/(stdev_sample/sqrt(samp_size))
+
+  ##permutation
+  for (i in my_nums) {
+  test_permut_index <- sample(1:nrow(mydata), size=cluster_size)
+  my_data_selectedmod <- mydata[module_name][,1]
+  test_permut <- my_data_selectedmod[test_permut_index]
+  ## sample mean
+  samp_mean <- mean(test_permut)
+  ## population mean
+  pop_mean <- mean(mydata[module_name][,1])
+  ## sample size
+  samp_size <- length(my_data_selectedmod)
+  ## standard deviation of sample
+  stdev_sample <- sd(my_data_selectedmod)
+  ## t stat 
+  my_t <- (samp_mean-pop_mean)/(stdev_sample/sqrt(samp_size))
+  all_mod_permutations[i] <- my_t
+  
+  }
+  
+  mypermuteddata <- data.frame(X=c(all_mod_permutations),Grp=rep(c("All"),times=c(1000)))
+
+  my_p <- mean(all_mod_permutations > my_clus_t, na.rm=TRUE)
+  my_p_list[j+1] <- my_p
+}
+  module_ps <- data.frame(cluster_id = my_clusters, p_value = my_p_list)
+
+  plot(module_ps$cluster_id, module_ps$p_value, main = module_name)
+  abline(h=.05)
+  
+  my_p_dataframe[module_name] <- my_p_list
+}
+
+rownames(my_p_dataframe) <- my_clusters
+
+
+### adjust p-value to account for the multiple testing, we have 43 gene networks and 38 clusters = 1,634 comparisons 
+pval_correction <- function(p) {
+  return(p.adjust(p, method = "fdr", n = 1634))
+}
+
+my_p_corrected_dataframe <- data.frame(matrix(nrow=38, ncol=43))
+
+my_modules <- seq(1,43, by=1)
+for (k in my_modules) {
+  my_p_corrected_dataframe[k] <- sapply(my_p_dataframe[k], pval_correction)
+}
+
+colnames(my_p_corrected_dataframe) <- colnames(mydata[2:44])
+rownames(my_p_corrected_dataframe) <- seq(0,37, by=1)
+rownames(my_p_corrected) <- seq(0,37, by=1)
+
+write.csv(my_p_dataframe, "WGCNA_analysis/240213_WGCNA_module_tstat_pvalues.csv")
+write.csv(my_p_corrected_dataframe, "WGCNA_analysis/240213_WGCNA_module__tstat_pvaluesCorrected.csv")
+
+
+### Connecting t-stat and p-value into 1 fun plot
+my_t_dataframe_sub <- my_t_dataframe
+for (m in colnames(my_t_dataframe_sub)) {
+  print(m)
+  my_t_dataframe_sub[m][my_p_dataframe[m] > .25] <- NA
+}
+
+my_t_dataframe_sub <- t(my_t_dataframe_sub)
+colnames(my_t_dataframe_sub) <- seq(0,37,by=1)
+
+viridis_map = circlize::colorRamp2(seq(-10, 
+                                       10, 
+                                       length.out = 1000),
+                                   viridis::inferno(1000))
+## inferno=magma > plasma > turbo > cividis
+
+rownames(my_t_dataframe) <- seq(0,37,by=1)
+Heatmap(t(my_t_dataframe), na_col="snow2", col=viridis_map, cluster_rows = TRUE, cluster_columns = TRUE, name = "t-statistic", #title of legend
+        column_title = "Cell Clusters", row_title = "Gene Modules", row_dend_width = unit(50, "mm"), column_dend_height = unit(50,"mm"), column_names_gp = gpar(fontsize=16), row_title_gp = gpar(fontsize=20), column_title_gp = gpar(fontsize=20), rect_gp = gpar(col = "white", lwd = 2),
+        row_names_gp = gpar(fontsize = 14), # Text size for row names
+         heatmap_height = unit(.75,"cm")*nrow(cluster_module_matrix), heatmap_width = unit(.8,"cm")*ncol(cluster_module_matrix), row_dend_gp = gpar(lwd=2), column_dend_gp = gpar(lwd=2))
+
+
+### Now making a nice graph to plot everything!
+
+rowannot1 <- c("cadetblue4", "red", "springgreen4", "cadetblue3", "thistle2", "plum2", "orchid2", "skyblue3", "paleturquoise2", "mediumpurple4", "palegreen1", "grey", "steelblue4", "pink3", "indianred2","mediumpurple2", "chocolate4", "springgreen", "violetred3", "tomato4", "orange", "lightyellow3","slateblue4", "lightsalmon", "magenta4","midnightblue","mistyrose", "maroon2", "magenta3","purple3","lightyellow2","gray2","tomato1","royalblue2", "yellow1","navy","palegreen4","olivedrab")
+rowAnnot2 <- c("0","1","2","3","4","5","6","7","8","9","10","11","12","13","14","15","16","17","18","19","20","21","22","23","24","25","26","27","28","29","30","31","32","33","34","35","36","37") 
+rowAnnot3 <- c("#53868b","#ff0000","#008b45","#7ac5cd","#eed2ee","#eeaeee","#ee7ae9","#6ca6cd","#aeeeee","#5d478b","#9aff9a","#bebebe","#36648b","#cd919e","#ee6363","#9f79ee","#8b4513","#00ff7f","#cd3278","#8b3626","#ffa500","#cdcdb4","#473c8b","#ffa07a","#8b008b","#191970","#ffe4e1","#ee30a7","cd00cd","#7d26cd","#eeeed1","#050505","#ff6347","#436eee","#ffff00","#000080","#548b54","#6b8e23")
+rowAnnotdf <- data.frame("cellclusters" = rowAnnot2,"cellclustercolor" = rowannot1, "cellclusterhex"=rowAnnot3)
+
+color_mapping_heatmap <- setNames(as.list(as.character(rowAnnotdf$cellclusterhex)), nm = rowAnnotdf$cellclusters)
+
+col1 <- list(clusters = c("0"="#53868b","1"="#ff0000","2"="#008b45","3"="#7ac5cd","4"="#eed2ee","5"="#eeaeee","6"="#ee7ae9","7"="#6ca6cd","8"="#aeeeee","9"="#5d478b","10"="#9aff9a","11"="#bebebe","12"="#36648b","13"="#cd919e","14"="#ee6363","15"="#9f79ee","16"="#8b4513","17"="#00ff7f","18"="#cd3278","19"="#8b3626","20"="#ffa500","21"="#cdcdb4","22"="#473c8b","23"="#ffa07a","24"="#8b008b","25"="#191970","26"="#ffe4e1","27"="#ee30a7","28"="#cd00cd","29"="#7d26cd","30"="#eeeed1","31"="#050505","32"="#ff6347","33"="#436eee","34"="#ffff00","35"="#000080","36"="#548b54","37"="#6b8e23"))
+
+cluster_module_csv <- read.csv("/Users/hopehealey/Dropbox (University of Oregon)/Hope_Dissertation_Folder/SingleCell/Ssc_single_cell/211210_Experiment/230120_ssc_emb1_embpouchISO_sscMT/WGCNA_analysis/230808_module_eigengene_correlations.csv", row.names = 1)
+
+mygroups <- as.data.frame(row.names(cluster_module_csv))
+colnames(mygroups) <- "clusters"
+
+colAnn <- HeatmapAnnotation(df = mygroups,
+  which = 'column',
+  col = col1,
+  annotation_width = unit(c(1, 4), 'cm'),
+  gap = unit(1, 'mm'))
+
+WGCNA_numGenes <- c(44, 194, 52,76,43,34,23,32,26,23,84,237,32,38,174,302,78,39,44,47,29,23,30,38,23,63,29,40,41,69,43,19,414,121,302,32,27,22,70,80,45,29) ## removed module 34 because it only has 7 genes
+
+
+wgcna_table <- read.csv("/Users/hopehealey/Dropbox (University of Oregon)/Hope_Dissertation_Folder/SingleCell/Ssc_single_cell/211210_Experiment/230120_ssc_emb1_embpouchISO_sscMT/WGCNA_analysis/231116_UPDATED_WGCNA_num_color_translation_table.csv")
+
+wgcna_table$WGCNA_cols <- paste0("ME", wgcna_table$WGCNA_cols)
+wgcna_table_reodered <- arrange(wgcna_table, WGCNA_cols)
+rownames(my_t_dataframe) <- seq(0,37, by=1)
+my_t_edited_dataframe <- my_t_dataframe
+my_t_edited_dataframe <- my_t_edited_dataframe[1:42] ## we remove gray because it only has 7 genes
+
+##matching the orders of the wgcna file with the t matrix
+reorder_idx <- match(colnames(my_t_edited_dataframe), wgcna_table_reodered$WGCNA_cols)
+color_new_order <- wgcna_table_reodered$WGCNA_cols[reorder_idx]
+new_nums <- wgcna_table_reodered$New_Nums[reorder_idx]
+new_sizes <- wgcna_table_reodered$WGCNA_numGenes[reorder_idx]
+
+colnames(my_t_edited_dataframe) <- new_nums
+my_t_matrix <- t(my_t_edited_dataframe)
+
+
+Heatmap(my_t_matrix, col = viridis_map,
+        name = "Correlations", #title of legend
+        column_title = "Cell Clusters", row_title = "Gene Modules", row_dend_width = unit(50, "mm"), column_dend_height = unit(50,"mm"), column_names_gp = gpar(fontsize=16), row_title_gp = gpar(fontsize=20), column_title_gp = gpar(fontsize=20), rect_gp = gpar(col = "white", lwd = 2),
+        row_names_gp = gpar(fontsize = 14), # Text size for row names
+        row_dend_side = "right", column_dend_side = "bottom", clustering_distance_rows = "pearson", clustering_distance_columns = "pearson", bottom_annotation = colAnn, heatmap_height = unit(.75,"cm")*nrow(my_t_matrix), heatmap_width = unit(.8,"cm")*ncol(my_t_matrix), row_dend_gp = gpar(lwd=2), column_dend_gp = gpar(lwd=2), right_annotation = rowAnnotation(numeric = anno_numeric(new_sizes, bg_gp = gpar(fill = "orange", col = "black", cex=10, lineheight=2))))
+
+
+```
+
+## Connectivity Measurements for assessing module dependence on individual cell clusters
+
+```{r}
+## intramodular connectivity - connectivity of nodes to other nodes within the network
+## first calculating with all of the cells in the dataset
+intraModconn <- intramodularConnectivity.fromExpr(datExpr, power=2, colors = merged_colors)
+rownames(intraModconn) <- colnames(datExpr)
+
+mynewcolors <- unique(merged_colors)
+mod_mean_kwithin <- c()
+mod_mean_koutside <- c()
+p <- 1
+  
+for (i in mynewcolors) {
+  genes <- data.frame(colnames(datExpr)[merged_colors == i])
+  colnames(genes) <- "gene"
+  module_kwithin_scores <- c()
+  module_koutside_scores <- c()
+  k <- 0
+  
+  
+  for (j in genes$gene) {intraModconn
+    #print(j)
+    k <- k + 1
+    index_gene <- which(rownames(intraModconn) == j)
+    gene_kwithinMod <- intraModconn[index_gene,]$kWithin
+    gene_koutsideMod <- intraModconn[index_gene,]$kOut
+    #print(gene_kwithinMod)
+    module_kwithin_scores[k] <- gene_kwithinMod
+    module_koutside_scores[k] <- gene_koutsideMod
+  }  
+  #module_results <- data.frame(withinMod = module_kwithin_scores, outsideMod = module_koutside_scores)
+  #hist(module_results$outsideMod,main=i, col=rgb(0,0,1,1/4), xlab = "Connectivity") ## blue
+  #hist(module_results$withinMod, add=TRUE,  col=rgb(1,0,0,1/4)) ## red
+  print(mean(module_kwithin_scores, na.rm = TRUE))
+  mod_mean_kwithin[p] <- mean(module_kwithin_scores, na.rm = FALSE)
+  mod_mean_koutside[p] <- mean(module_koutside_scores, na.rm = TRUE)
+  p <- p +1
+  }
+
+connectivity_modules <- data.frame(module=mynewcolors, kmeanwithin=mod_mean_kwithin, kmeanoutside=mod_mean_koutside)
+
+#######
+### now calculating when I drop data from 1 cell type
+
+bonecells <- subset(mydata, `pipefish.integrated$seurat_clusters`=="18")$cellid
+datExpr_nobone <- datExpr[!(row.names(datExpr) %in% bonecells),]
+
+intraModconnNobone <- intramodularConnectivity.fromExpr(datExpr_nobone, power=2, colors = merged_colors)
+rownames(intraModconnNobone) <- colnames(datExpr)
+
+mynewcolors <- unique(merged_colors)
+mod_mean_kwithin <- c()
+mod_mean_koutside <- c()
+p <- 1
+  
+for (i in mynewcolors) {
+  genes <- data.frame(colnames(datExpr)[merged_colors == i])
+  colnames(genes) <- "gene"
+  module_kwithin_scores <- c()
+  module_koutside_scores <- c()
+  k <- 0
+   for (j in genes$gene) {
+    #print(j)
+    k <- k + 1
+    index_gene <- which(rownames(intraModconnNobone) == j)
+    gene_kwithinMod <- intraModconnNobone[index_gene,]$kWithin
+    gene_koutsideMod <- intraModconnNobone[index_gene,]$kOut
+    #print(gene_kwithinMod)
+    module_kwithin_scores[k] <- gene_kwithinMod
+    module_koutside_scores[k] <- gene_koutsideMod
+  }  
+  print(mean(module_kwithin_scores, na.rm = TRUE))
+  mod_mean_kwithin[p] <- mean(module_kwithin_scores, na.rm = FALSE)
+  mod_mean_koutside[p] <- mean(module_koutside_scores, na.rm = TRUE)
+  p <- p +1
+  }
+
+connectivity_modulesNobone <- data.frame(module=mynewcolors, kmeanwithin=mod_mean_kwithin, kmeanoutside=mod_mean_koutside)
+connectivity_modulesNobone_Changes <- data.frame(module=mynewcolors, kmeanwithin=mod_mean_kwithin-connectivity_modules$kmeanwithin, kmeanoutside=mod_mean_koutside-connectivity_modules$kmeanoutside) 
+
+### "big" decrease in the light yellow module k within score as predicted so now we can try doing permutations 
+
+## permutation goal, establish a null distribution of connectivity k within and outside decreases when cells are removed to compare to the decreases seen when only the bone cells are axed
+
+npermut <- 100
+my_nums <- seq(1, npermut, by=1)
+clus18_size <- length(bonecells)
+permutations_within_changes <- matrix(NA, nrow=npermut, ncol=43)
+permutations_outside_changes <- matrix(NA, nrow=npermut, ncol=43)
+colnames(permutations_within_changes) <- mynewcolors
+colnames(permutations_outside_changes) <- mynewcolors
+mod_mean_kwithin <- c()
+mod_mean_koutside <- c()
+
+
+for (m in my_nums) {
+  test_permut_index <- sample(1:nrow(datExpr), size=clus18_size)
+  cell_names <- as.data.frame(pipefish.integrated$orig.ident[test_permut_index])
+  test_permut <- datExpr[!(row.names(datExpr) %in% row.names(cell_names)),]
+  intraModconnPermut <- intramodularConnectivity.fromExpr(test_permut, power=2, colors = merged_colors)
+  rownames(intraModconnPermut) <- colnames(datExpr)
+  p <- 1
+  mod_mean_kwithin <- c()
+  mod_mean_koutside <- c()
+
+for (i in mynewcolors) {
+  genes <- data.frame(colnames(datExpr)[merged_colors == i])
+  colnames(genes) <- "gene"
+  module_kwithin_scores <- c()
+  module_koutside_scores <- c()
+  k <- 0
+  
+   for (j in genes$gene) {
+    k <- k + 1
+    index_gene <- which(rownames(intraModconnPermut) == j)
+    gene_kwithinMod <- intraModconnPermut[index_gene,]$kWithin
+    gene_koutsideMod <- intraModconnPermut[index_gene,]$kOut
+    module_kwithin_scores[k] <- gene_kwithinMod
+    module_koutside_scores[k] <- gene_koutsideMod
+   }  
+  
+  mod_mean_kwithin[p] <- mean(module_kwithin_scores, na.rm = TRUE)
+  mod_mean_koutside[p] <- mean(module_koutside_scores, na.rm = TRUE)
+  p <- p +1
+}
+permutations_within_changes[m,] <-  mod_mean_kwithin-connectivity_modules$kmeanwithin
+permutations_outside_changes[m,] <-mod_mean_koutside-connectivity_modules$kmeanoutside 
+}
+
+## now with those data, we can compare to the bone attempt
+connectivity_modulesNobone_Changes <- t(connectivity_modulesNobone_Changes)
+colnames(connectivity_modulesNobone_Changes) <- connectivity_modulesNobone_Changes[1,]
+
+## setting up a matrix to put the data
+pvalues_bone <- matrix(NA, nrow=43, ncol=2)
+k <- 1
+
+## getting p-values
+for (g in colnames(permutations_within_changes)) {
+  values_perm <- as.numeric(as.data.frame(permutations_within_changes)[g][,1])
+  values_perm <- values_perm[!is.na(values_perm)]
+  
+  values_bone <- as.numeric(as.data.frame(connectivity_modulesNobone_Changes)[g][2,])
+  values_bone <- values_bone[!is.na(values_bone)]
+  
+  boxplot(values_perm, main=g, ylim=c(-5,5), col="hotpink")
+  abline(h=values_bone)
+  
+  my_p <- mean(values_perm  < values_bone, na.rm = TRUE)
+  my_p_corrected <- p.adjust(my_p, method = "fdr", n = 43)
+  
+  pvalues_bone[,1][k] <- my_p
+  pvalues_bone[,2][k] <- my_p_corrected
+  
+  print(g)
+  print(my_p)
+  print(my_p_corrected)
+  k <- k+1
+}
+ 
+rownames(pvalues_bone) <- colnames(permutations_within_changes)
+colnames(pvalues_bone) <- c("P_value", "P_value_corrected")
+
+########### Now doing permutations for all cell clusters ################
+npermut <- 1000
+my_nums <- seq(1, npermut, by=1)
+
+clusters <- seq(0,37, by=1)
+pvalues <-  matrix(NA, nrow=43, ncol=38)
+corrected_pvalues <-  matrix(NA, nrow=43, ncol=38)
+
+## going through all of the cells
+for (c in clusters) {
+  ## setting up things for each cluster
+  cluster <- subset(mydata, `pipefish.integrated$seurat_clusters`==c)$cellid
+  cluster_size <- length(cluster)
+  permutations_within_changes <- matrix(NA, nrow=npermut, ncol=43)
+  permutations_outside_changes <- matrix(NA, nrow=npermut, ncol=43)
+  colnames(permutations_within_changes) <- mynewcolors
+  colnames(permutations_outside_changes) <- mynewcolors
+  mod_mean_kwithin <- c()
+  mod_mean_koutside <- c()
+  
+  ### doing permutations
+  for (m in my_nums) {
+  test_permut_index <- sample(1:nrow(datExpr), size=clus18_size)
+  cell_names <- as.data.frame(pipefish.integrated$orig.ident[test_permut_index])
+  test_permut <- datExpr[!(row.names(datExpr) %in% row.names(cell_names)),]
+  intraModconnPermut <- intramodularConnectivity.fromExpr(test_permut, power=2, colors = merged_colors)
+  rownames(intraModconnPermut) <- colnames(datExpr)
+  p <- 1
+  mod_mean_kwithin <- c()
+  mod_mean_koutside <- c()
+
+for (i in mynewcolors) {
+  genes <- data.frame(colnames(datExpr)[merged_colors == i])
+  colnames(genes) <- "gene"
+  module_kwithin_scores <- c()
+  module_koutside_scores <- c()
+  k <- 0
+  
+   for (j in genes$gene) {
+    k <- k + 1
+    index_gene <- which(rownames(intraModconnPermut) == j)
+    gene_kwithinMod <- intraModconnPermut[index_gene,]$kWithin
+    gene_koutsideMod <- intraModconnPermut[index_gene,]$kOut
+    module_kwithin_scores[k] <- gene_kwithinMod
+    module_koutside_scores[k] <- gene_koutsideMod
+   }  
+  
+  mod_mean_kwithin[p] <- mean(module_kwithin_scores, na.rm = TRUE)
+  mod_mean_koutside[p] <- mean(module_koutside_scores, na.rm = TRUE)
+  p <- p +1
+}
+permutations_within_changes[m,] <-  mod_mean_kwithin-connectivity_modules$kmeanwithin
+permutations_outside_changes[m,] <-mod_mean_koutside-connectivity_modules$kmeanoutside 
+  }
+
+## calculating the baseline for dropping that cell cluster
+datExpr_noC <- datExpr[!(row.names(datExpr) %in% cluster),]
+
+intraModconnNoC <- intramodularConnectivity.fromExpr(datExpr_noC, power=2, colors = merged_colors)
+rownames(intraModconnNoC) <- colnames(datExpr)
+
+mynewcolors <- unique(merged_colors)
+mod_mean_kwithin <- c()
+mod_mean_koutside <- c()
+p <- 1
+  
+for (i in mynewcolors) {
+  genes <- data.frame(colnames(datExpr)[merged_colors == i])
+  colnames(genes) <- "gene"
+  module_kwithin_scores <- c()
+  module_koutside_scores <- c()
+  k <- 0
+   for (j in genes$gene) {
+    k <- k + 1
+    index_gene <- which(rownames(intraModconnNoC) == j)
+    gene_kwithinMod <- intraModconnNoC[index_gene,]$kWithin
+    gene_koutsideMod <- intraModconnNoC[index_gene,]$kOut
+    module_kwithin_scores[k] <- gene_kwithinMod
+    module_koutside_scores[k] <- gene_koutsideMod
+  }  
+  print(mean(module_kwithin_scores, na.rm = TRUE))
+  mod_mean_kwithin[p] <- mean(module_kwithin_scores, na.rm = FALSE)
+  mod_mean_koutside[p] <- mean(module_koutside_scores, na.rm = TRUE)
+  p <- p +1
+  }
+
+### preparing the datasets  
+connectivity_modulesNoC <- data.frame(module=mynewcolors, kmeanwithin=mod_mean_kwithin, kmeanoutside=mod_mean_koutside)
+connectivity_modulesNoC_Changes <- data.frame(module=mynewcolors, kmeanwithin=mod_mean_kwithin-connectivity_modules$kmeanwithin, kmeanoutside=mod_mean_koutside-connectivity_modules$kmeanoutside)   
+connectivity_modulesNoC_Changes <- t(connectivity_modulesNoC_Changes)
+colnames(connectivity_modulesNoC_Changes) <- connectivity_modulesNoC_Changes[1,]
+
+## setting up a matrix to put the data
+pvalues_mine <- matrix(NA, nrow=43, ncol=2)
+k <- 1
+
+for (g in colnames(permutations_within_changes)) {
+  values_perm <- as.numeric(as.data.frame(permutations_within_changes)[g][,1])
+  values_perm <- values_perm[!is.na(values_perm)]
+  
+  values_C <- as.numeric(as.data.frame(connectivity_modulesNoC_Changes)[g][2,])
+  values_C <- values_C[!is.na(values_C)]
+  
+  boxplot(values_perm, main=g, ylim=c(-5,5), col="hotpink")
+  abline(h=values_C)
+  
+  my_p <- mean(values_perm  < values_C, na.rm = TRUE)
+  my_p_corrected <- p.adjust(my_p, method = "fdr", n = 1634)
+  
+  pvalues_mine[,1][k] <- my_p
+  pvalues_mine[,2][k] <- my_p_corrected
+  
+  print(g)
+  print(my_p)
+  print(my_p_corrected)
+  k <- k+1
+}
+
+colnames(pvalues_mine) <- c("P_value", "P_value_corrected")
+pvalues_mine <- as.data.frame(pvalues_mine)
+pvalues[,c+1] <- pvalues_mine$P_value
+corrected_pvalues[,c+1] <- pvalues_mine$P_value_corrected
+}
+
+write.csv(corrected_pvalues, "WGCNA_analysis/240213_WGCNA_permutation1000_connectivity_pvalues_fdrcorrected.csv")
+
+```
